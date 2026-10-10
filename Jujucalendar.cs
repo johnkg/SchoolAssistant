@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Text;
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Services;
@@ -199,6 +200,34 @@ public class JujuCalendar
 
     public Task<GEvent> InsertAsync(GEvent ev, CancellationToken ct = default) =>
         _svc.Value.Events.Insert(ev, CalId).ExecuteAsync(ct);
+
+    static bool IsGone(Exception ex) =>
+        ex is Google.GoogleApiException g && (g.HttpStatusCode == HttpStatusCode.NotFound || g.HttpStatusCode == HttpStatusCode.Gone);
+
+    /// <summary>The event, or null if it was deleted from the calendar.</summary>
+    public async Task<GEvent?> TryGetAsync(string id, CancellationToken ct = default)
+    {
+        try
+        {
+            var g = await _svc.Value.Events.Get(CalId, id).ExecuteAsync(ct);
+            return g.Status == "cancelled" ? null : g;
+        }
+        catch (Exception ex) when (IsGone(ex)) { return null; }
+    }
+
+    /// <summary>Deletes the event; already gone counts as success.</summary>
+    public async Task DeleteAsync(string id, CancellationToken ct = default)
+    {
+        try { await _svc.Value.Events.Delete(CalId, id).ExecuteAsync(ct); }
+        catch (Exception ex) when (IsGone(ex)) { }
+    }
+
+    /// <summary>The sheet cell text we stored in the event description (without the footer or old details).</summary>
+    public static string SheetText(GEvent g)
+    {
+        var d = (g.Description ?? "").Split(PrevMarker)[0];
+        return d.Split("— School tracker sheet")[0].Trim();
+    }
 
     // Get + Update (not Patch) so switching between all-day and timed can't leave both date and dateTime set.
     public async Task<GEvent> UpdateAsync(string id, GEvent fresh, bool keepPrevious = true, CancellationToken ct = default)

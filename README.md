@@ -26,7 +26,7 @@ Google Sheet ──hourly timer / "/sync"──▶ parse grid ──▶ LLM name
 - Timed events get a real start time (1 hour default) and the time repeated in the description.
 - Birthdays repeat yearly as all-day events.
 - If a similar event already exists (±7 days), the bot asks before adding or updating.
-- Sheet sync: reads the tracker sheet, creates events from cells (cell text goes in the description), asks before changing anything already handled, and never deletes.
+- Sheet sync: reads the tracker sheet, creates events from cells (cell text goes in the description), asks before changing anything already handled, and asks before deleting (an item that vanished from the sheet, or one whose date moved, is offered as an update or a delete).
 - Very short replies (for example `✅ Quiz 2, Thu Oct 9`).
 - LLM provider is an adapter (`ILlmClient`): OpenAI by default, Anthropic supported.
 
