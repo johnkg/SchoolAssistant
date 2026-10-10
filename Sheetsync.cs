@@ -24,6 +24,18 @@ internal static class SyncStore
             ["Title"] = title
         }, TableUpdateMode.Replace);
 
+    // Closes out a row whose sheet item is gone (deleted, moved to another day, or kept on purpose).
+    public static Task MarkAsync(string gid, string rk, string status) =>
+        Db.Table("Synced").UpsertEntityAsync(new TableEntity(gid, rk)
+        {
+            ["Status"] = status,
+            ["EventId"] = ""
+        }, TableUpdateMode.Merge);
+
+    // Remember that we asked what to do about a vanished item, so we don't ask again every hour.
+    public static Task GoneAskedAsync(string gid, string rk) =>
+        Db.Table("Synced").UpsertEntityAsync(new TableEntity(gid, rk) { ["GoneAsked"] = "1" }, TableUpdateMode.Merge);
+
     // Remember that we asked about this version, so we don't ask again every hour.
     public static Task AskedAsync(string gid, string rk, string key, string askedHash) =>
         Db.Table("Synced").UpsertEntityAsync(new TableEntity(gid, rk)
@@ -148,7 +160,22 @@ public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpCl
                 fresh.Add(it);
         }
 
-        if (fresh.Count == 0 && changed.Count == 0)
+        // Items we synced earlier that are no longer in the sheet: either moved to another first day or removed.
+        var gone = await FindGoneAsync(gid, synced, items, today);
+        var goneEvents = gone.ToDictionary(g => g.Row.RowKey, g => g.Ev);
+        if (gone.Count > 0 && fresh.Count > 0)
+        {
+            foreach (var g in gone.ToList())
+            {
+                var move = FindMove(g, fresh);
+                if (move == null) continue;
+                fresh.Remove(move);
+                changed.Add((move, g.Row)); // old row + new item: handled as a date move below
+                gone.Remove(g);
+            }
+        }
+
+        if (fresh.Count == 0 && changed.Count == 0 && gone.Count == 0)
         {
             await SaveHashAsync(state, stateRk, csvHash);
             return;
@@ -203,15 +230,45 @@ public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpCl
             var ev = events[fresh.Count + k];
             try
             {
+                var moved = old.RowKey != it.Rk;
+                var was = old.GetString("Title") ?? it.Subject;
+                if (moved && goneEvents.TryGetValue(old.RowKey, out var oldEv)) was += ", " + JujuCalendar.WhenEvent(oldEv);
                 await PromptAsync(chatId, "sheet-chg", it, ev, old.GetString("EventId") ?? "",
-                    $"❓ Sheet changed:\n• Was: {old.GetString("Title") ?? it.Subject}\nNow: {ev.Title}, {JujuCalendar.When(ev)}\n{Flat(it.Text, 160)}",
-                    KeyboardKind.Update);
+                    $"❓ Sheet {(moved ? "date moved" : "changed")}:\n• Was: {was}\nNow: {ev.Title}, {JujuCalendar.When(ev)}\n{Flat(it.Text, 160)}",
+                    KeyboardKind.Update, moved ? old.RowKey : "");
             }
             catch (Exception ex)
             {
                 failed = true;
                 log.LogError(ex, "Sheet change prompt failed: {Title}", ev.Title);
                 if (manual) lines.Add($"❌ {ev.Title}: {Short(ex)}");
+            }
+        }
+
+        foreach (var (row, gEv) in gone)
+        {
+            try
+            {
+                var title = gEv.Summary ?? row.GetString("Title") ?? "Event";
+                var pid = Guid.NewGuid().ToString("N")[..12];
+                await Db.Table("Pending").AddEntityAsync(new TableEntity("p", pid)
+                {
+                    ["EventJson"] = JsonSerializer.Serialize(new ExtractedEvent { Title = title, Date = JujuCalendar.StartDay(gEv)?.ToString("yyyy-MM-dd", Inv) }),
+                    ["MatchId"] = row.GetString("EventId") ?? "",
+                    ["Status"] = "pending",
+                    ["Kind"] = "sheet-del",
+                    ["Gid"] = gid,
+                    ["Rk"] = row.RowKey
+                });
+                await SyncStore.GoneAskedAsync(gid, row.RowKey);
+                await tg.SendAsync(chatId, $"❓ Removed from the sheet:\n• {title}, {JujuCalendar.WhenEvent(gEv)}\nDelete it from the calendar?",
+                    TelegramApi.Keyboard(pid, KeyboardKind.Remove));
+            }
+            catch (Exception ex)
+            {
+                failed = true;
+                log.LogError(ex, "Sheet removal prompt failed: {Id}", row.RowKey);
+                if (manual) lines.Add($"❌ Removal check: {Short(ex)}");
             }
         }
 
@@ -229,7 +286,8 @@ public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpCl
         state.UpsertEntityAsync(new TableEntity("sheet", rk) { ["Hash"] = hash });
 
     // Pending proposal + buttons; also remembers we asked, so the next sync doesn't repeat it.
-    async Task PromptAsync(long chatId, string kind, SheetItem it, ExtractedEvent ev, string matchId, string text, KeyboardKind keys)
+    // oldRk is set when the item moved to a new first day: the old row is closed once the user answers.
+    async Task PromptAsync(long chatId, string kind, SheetItem it, ExtractedEvent ev, string matchId, string text, KeyboardKind keys, string oldRk = "")
     {
         var pid = Guid.NewGuid().ToString("N")[..12];
         await Db.Table("Pending").AddEntityAsync(new TableEntity("p", pid)
@@ -241,10 +299,51 @@ public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpCl
             ["Gid"] = it.Gid,
             ["Rk"] = it.Rk,
             ["Key"] = it.Key,
-            ["Hash"] = it.Hash
+            ["Hash"] = it.Hash,
+            ["OldRk"] = oldRk
         });
         await SyncStore.AskedAsync(it.Gid, it.Rk, it.Key, it.Hash);
+        if (oldRk.Length > 0) await SyncStore.GoneAskedAsync(it.Gid, oldRk); // don't also ask to delete it
         await tg.SendAsync(chatId, text, TelegramApi.Keyboard(pid, keys));
+    }
+
+    // Synced rows whose sheet item has disappeared. Only upcoming ones, and only if the calendar event still exists.
+    async Task<List<(TableEntity Row, GEvent Ev)>> FindGoneAsync(string gid, Dictionary<string, TableEntity> synced, List<SheetItem> items, DateOnly today)
+    {
+        var live = items.Select(i => i.Rk).ToHashSet();
+        var result = new List<(TableEntity, GEvent)>();
+        foreach (var row in synced.Values)
+        {
+            var eventId = row.GetString("EventId");
+            if (live.Contains(row.RowKey) || row.GetString("Status") != "synced" || string.IsNullOrEmpty(eventId)
+                || row.GetString("GoneAsked") == "1") continue;
+
+            var key = row.GetString("Key") ?? "";
+            if (!DateOnly.TryParseExact(key[(key.LastIndexOf('|') + 1)..], "yyyyMMdd", Inv, DateTimeStyles.None, out var start) || start < today)
+                continue; // the past is left alone
+
+            var ev = await cal.TryGetAsync(eventId);
+            if (ev == null) { await SyncStore.MarkAsync(gid, row.RowKey, "removed"); continue; } // already deleted by hand
+            result.Add((row, ev));
+        }
+        return result;
+    }
+
+    // A new item that is the same subject and cell text as a vanished one, closest in date: the date was moved.
+    static SheetItem? FindMove((TableEntity Row, GEvent Ev) gone, List<SheetItem> fresh)
+    {
+        var key = gone.Row.GetString("Key") ?? "";
+        var a = key.IndexOf('|');
+        var b = key.LastIndexOf('|');
+        if (a < 0 || b <= a) return null;
+        var subject = key[(a + 1)..b];
+        var text = SheetParser.Norm(JujuCalendar.SheetText(gone.Ev));
+        if (text.Length == 0 || JujuCalendar.StartDay(gone.Ev) is not DateOnly oldStart) return null;
+
+        return fresh
+            .Where(f => string.Equals(f.Subject, subject, StringComparison.OrdinalIgnoreCase) && SheetParser.Norm(f.Text) == text)
+            .OrderBy(f => Math.Abs(f.Start.DayNumber - oldStart.DayNumber))
+            .FirstOrDefault();
     }
 
     static ExtractedEvent ToEvent(SheetItem it, string title, string type) => new()

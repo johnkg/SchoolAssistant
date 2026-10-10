@@ -316,6 +316,15 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
         {
             switch (act)
             {
+                case "d" when kind == "sheet-del":
+                    await cal.DeleteAsync(matchId);
+                    await SyncStore.MarkAsync(p.GetString("Gid")!, p.GetString("Rk")!, "removed");
+                    result = $"🗑 Deleted: {ev.Title}";
+                    break;
+                case "s" when kind == "sheet-del":
+                    await SyncStore.MarkAsync(p.GetString("Gid")!, p.GetString("Rk")!, "kept");
+                    result = $"📌 Kept: {ev.Title}";
+                    break;
                 case "s":
                     result = $"⏭ Skipped: {ev.Title}";
                     if (fromSheet)
@@ -344,6 +353,11 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
             try { p["Status"] = "pending"; await table.UpdateEntityAsync(p, ETag.All); } catch { }
             throw;
         }
+
+        // A moved item: its old row is done whichever way the user answered
+        var oldRk = p.GetString("OldRk");
+        if (fromSheet && !string.IsNullOrEmpty(oldRk))
+            await SyncStore.MarkAsync(p.GetString("Gid")!, oldRk, "moved");
 
         await tg.EditAsync(chatId, messageId, result);
     }

@@ -4,7 +4,7 @@ using System.Text.Json.Serialization;
 
 namespace SchoolAssistant;
 
-public enum KeyboardKind { Match, Add, Update }
+public enum KeyboardKind { Match, Add, Update, Remove }
 
 public class TelegramApi(IHttpClientFactory f)
 {
@@ -34,7 +34,7 @@ public class TelegramApi(IHttpClientFactory f)
 
     public sealed record Btn(string text, string callback_data);
 
-    // Match: similar event found. Add: not sure, add it? Update: the sheet changed.
+    // Match: similar event found. Add: not sure, add it? Update: the sheet changed. Remove: the item left the sheet.
     public static object Keyboard(string id, KeyboardKind kind) => new
     {
         inline_keyboard = new[]
@@ -43,6 +43,7 @@ public class TelegramApi(IHttpClientFactory f)
             {
                 KeyboardKind.Match => new[] { new Btn("Update existing", "u:" + id), new Btn("Add as new", "n:" + id), new Btn("Skip", "s:" + id) },
                 KeyboardKind.Update => new[] { new Btn("Update", "u:" + id), new Btn("Skip", "s:" + id) },
+                KeyboardKind.Remove => new[] { new Btn("Delete", "d:" + id), new Btn("Keep", "s:" + id) },
                 _ => new[] { new Btn("Add", "n:" + id), new Btn("Skip", "s:" + id) }
             }
         }
