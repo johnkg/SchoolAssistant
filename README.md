@@ -104,6 +104,13 @@ dotnet build
 func azure functionapp publish <appname>
 ```
 
+#### Deploy from GitHub Actions
+
+`.github/workflows/deploy.yml` builds on every pull request and deploys on every push to `main`. In the repo settings add:
+
+- Secret `AZURE_FUNCTIONAPP_PUBLISH_PROFILE`: the contents of the Function App's publish profile (Azure Portal, **Get publish profile**).
+- Variable `AZURE_FUNCTIONAPP_NAME`: the Function App name.
+
 ### 7. Register the webhook
 
 ```bash
