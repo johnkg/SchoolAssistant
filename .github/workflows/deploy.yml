@@ -24,11 +24,16 @@ jobs:
       - name: Publish
         run: dotnet publish SchoolAssistant.csproj -c Release -o ${{ env.PUBLISH_DIR }}
 
+      # Azure rejects the package without this hidden folder, so fail here instead of at deploy time.
+      - name: Check package layout
+        run: test -d "${{ env.PUBLISH_DIR }}/.azurefunctions"
+
       - uses: actions/upload-artifact@v4
         if: github.event_name != 'pull_request'
         with:
           name: functionapp
           path: ${{ env.PUBLISH_DIR }}
+          include-hidden-files: true # keeps .azurefunctions, which upload-artifact skips by default
 
   deploy:
     # PRs only get the build check above; deploys happen from main.
