@@ -104,6 +104,28 @@ dotnet build
 func azure functionapp publish <appname>
 ```
 
+#### Deploy from GitHub Actions
+
+`.github/workflows/deploy.yml` builds on every pull request and deploys on every push to `main`. Flex Consumption does not support publish profiles, so it signs in to Azure with OIDC (no stored password).
+
+One-time setup:
+
+```bash
+SUB=$(az account show --query id -o tsv)
+APP_ID=$(az ad app create --display-name school-assistant-deploy --query appId -o tsv)
+az ad sp create --id $APP_ID
+az ad app federated-credential create --id $APP_ID --parameters '{
+  "name": "github-main",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "subject": "repo:<owner>/<repo>:ref:refs/heads/main",
+  "audiences": ["api://AzureADTokenExchange"]
+}'
+az role assignment create --assignee $APP_ID --role "Website Contributor" \
+  --scope /subscriptions/$SUB/resourceGroups/<rg>/providers/Microsoft.Web/sites/<appname>
+```
+
+Then in the GitHub repo settings add the secrets `AZURE_CLIENT_ID` (the `$APP_ID`), `AZURE_TENANT_ID` (`az account show --query tenantId -o tsv`) and `AZURE_SUBSCRIPTION_ID` (`$SUB`), and the variable `AZURE_FUNCTIONAPP_NAME`.
+
 ### 7. Register the webhook
 
 ```bash
