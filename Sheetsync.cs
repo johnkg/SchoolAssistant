@@ -183,7 +183,7 @@ public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpCl
 
         // One LLM call names everything new or changed
         var all = fresh.Concat(changed.Select(c => c.Item)).ToList();
-        var named = await NameItemsAsync(all);
+        var named = all.Count > 0 ? await NameItemsAsync(all) : new List<(string Title, string Type)>(); // nothing to name when items only vanished
         var events = all.Select((it, i) => ToEvent(it, named[i].Title, named[i].Type)).ToList();
 
         // One LLM call checks new items against events already on the calendar
