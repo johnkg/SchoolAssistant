@@ -117,12 +117,14 @@ az ad sp create --id $APP_ID
 az ad app federated-credential create --id $APP_ID --parameters '{
   "name": "github-main",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:<owner>/<repo>:ref:refs/heads/main",
+  "subject": "<subject>",
   "audiences": ["api://AzureADTokenExchange"]
 }'
 az role assignment create --assignee $APP_ID --role "Website Contributor" \
   --scope /subscriptions/$SUB/resourceGroups/<rg>/providers/Microsoft.Web/sites/<appname>
 ```
+
+`<subject>` must match the token GitHub sends exactly. For most repos it is `repo:<owner>/<repo>:ref:refs/heads/main`. Some repos send an ID-based form instead, such as `repo:<owner>@<owner-id>/<repo>@<repo-id>:ref:refs/heads/main`. If the deploy fails with `AADSTS700213: No matching federated identity record found for presented assertion subject '...'`, copy the subject from that error message and create a credential with it.
 
 Then in the GitHub repo settings add the secrets `AZURE_CLIENT_ID` (the `$APP_ID`), `AZURE_TENANT_ID` (`az account show --query tenantId -o tsv`) and `AZURE_SUBSCRIPTION_ID` (`$SUB`), and the variable `AZURE_FUNCTIONAPP_NAME`.
 
