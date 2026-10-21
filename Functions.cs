@@ -1,5 +1,4 @@
 using System.Net;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Azure;
@@ -14,6 +13,14 @@ namespace SchoolAssistant;
 // ---------- 1) Telegram webhook: announcement -> Juju calendar ----------
 public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, SheetSync sync, ILogger<TelegramWebhook> log)
 {
+    const string SecretHeader = "X-Telegram-Bot-Api-Secret-Token";
+    const string SyncCommand = "/sync";
+    const string PdfMime = "application/pdf";
+    const string JpegMime = "image/jpeg";
+    const string PngMime = "image/png";
+    const long MaxAttachmentBytes = 10_000_000;
+    const int VerbatimBodyMaxChars = 1500; // a short message is copied as-is into an important event's description
+
     const string ExtractPrompt = """
         You extract school events for a parent. Philippines, Asia/Manila time. Today is {TODAY}.
         Read the message text and any attached image or PDF. Find every dated item: events, quizzes, exams, written works, performance tasks, deadlines, birthdays, no-class days.
@@ -46,12 +53,12 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
         var ok = req.CreateResponse(HttpStatusCode.OK); // always 200 so Telegram doesn't retry forever
 
         // Verify the request really came from Telegram
-        if (!req.Headers.TryGetValues("X-Telegram-Bot-Api-Secret-Token", out var s) ||
-            s.FirstOrDefault() != Env.Get("TELEGRAM_SECRET"))
+        if (!req.Headers.TryGetValues(SecretHeader, out var s) ||
+            s.FirstOrDefault() != Env.Get(Settings.TelegramSecret))
             return req.CreateResponse(HttpStatusCode.Unauthorized);
 
-        var expected = Env.Get("TELEGRAM_CHAT_ID");
-        var debug = Env.GetOr("DEBUG_REPLIES", "false") == "true"; // only used for the wrong-chat-id hint
+        var expected = Env.Get(Settings.TelegramChatId);
+        var debug = Env.GetOr(Settings.DebugReplies, "false") == "true"; // only used for the wrong-chat-id hint
         long? replyChat = null;
 
         try
@@ -88,16 +95,16 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
                      : msg.TryGetProperty("caption", out var c) ? c.GetString() : "";
 
             // Dedupe: a repeated update_id is skipped
-            var table = Db.Table("Messages");
-            try { await table.AddEntityAsync(new TableEntity("tg", updateId) { ["Text"] = text ?? "" }); }
-            catch (RequestFailedException e) when (e.Status == 409)
+            var table = Db.Table(Tables.Messages);
+            try { await table.AddEntityAsync(new TableEntity(Tables.MessagesPartition, updateId) { [Columns.Text] = text ?? "" }); }
+            catch (RequestFailedException e) when (e.Status == (int)HttpStatusCode.Conflict)
             {
                 log.LogInformation("Duplicate update {UpdateId}, skipping", updateId);
                 return ok;
             }
 
             // Manual sheet sync: send /sync to the bot
-            if (text?.Trim().StartsWith("/sync", StringComparison.OrdinalIgnoreCase) == true)
+            if (text?.Trim().StartsWith(SyncCommand, StringComparison.OrdinalIgnoreCase) == true)
             {
                 await sync.RunAsync(chatId, manual: true);
                 return ok;
@@ -108,16 +115,16 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
             if (msg.TryGetProperty("photo", out var photos))
             {
                 var fileId = photos.EnumerateArray().Last().GetProperty("file_id").GetString()!;
-                parts.Add(new ImagePart(await tg.DownloadAsync(fileId), "image/jpeg"));
+                parts.Add(new ImagePart(await tg.DownloadAsync(fileId), JpegMime));
             }
             else if (msg.TryGetProperty("document", out var d))
             {
                 var mime = d.TryGetProperty("mime_type", out var m) ? m.GetString() : "";
                 var size = d.TryGetProperty("file_size", out var sz) ? sz.GetInt64() : 0;
                 var fileId = d.GetProperty("file_id").GetString()!;
-                if (mime == "application/pdf" && size < 10_000_000)
+                if (mime == PdfMime && size < MaxAttachmentBytes)
                     parts.Add(new PdfPart(await tg.DownloadAsync(fileId)));
-                else if (mime is "image/jpeg" or "image/png" && size < 10_000_000)
+                else if (mime is JpegMime or PngMime && size < MaxAttachmentBytes)
                     parts.Add(new ImagePart(await tg.DownloadAsync(fileId), mime!));
                 else
                     await tg.SendAsync(chatId, $"⚠️ Can't read this file type ({mime}).");
@@ -127,8 +134,8 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
             var raw = await llm.AskAsync(ExtractPrompt.Replace("{TODAY}", LlmUtil.Today()), parts);
             var json = LlmUtil.StripFences(raw);
 
-            var saved = await table.GetEntityAsync<TableEntity>("tg", updateId);
-            saved.Value["ResultJson"] = json;
+            var saved = await table.GetEntityAsync<TableEntity>(Tables.MessagesPartition, updateId);
+            saved.Value[Columns.ResultJson] = json;
             await table.UpdateEntityAsync(saved.Value, ETag.All);
 
             Extraction x;
@@ -141,7 +148,7 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
 
             // One important event in a short text message: copy the message itself, exactly as sent
             var important = x.Events.Where(ev => ev.IsAssessment).ToList();
-            if (important.Count == 1 && !string.IsNullOrWhiteSpace(text) && text!.Length <= 1500)
+            if (important.Count == 1 && !string.IsNullOrWhiteSpace(text) && text!.Length <= VerbatimBodyMaxChars)
                 important[0].Body = text.Trim();
 
             await ProcessAsync(chatId, x);
@@ -151,7 +158,7 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
             log.LogError(ex, "Webhook failed");
             if (replyChat is long c)
             {
-                try { await tg.SendAsync(c, "❌ " + Short(ex)); }
+                try { await tg.SendAsync(c, "❌ " + TextUtil.Short(ex)); }
                 catch (Exception inner) { log.LogError(inner, "Could not send error reply"); }
             }
         }
@@ -160,19 +167,12 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
 
     static long ChatOf(JsonElement message) => message.GetProperty("chat").GetProperty("id").GetInt64();
 
-    static string Short(Exception ex)
-    {
-        var m = ex.Message.Replace("\n", " ");
-        return m.Length > 200 ? m[..200] + "…" : m;
-    }
-
     // ---------- extracted events -> calendar (or ask first) ----------
     async Task ProcessAsync(long chatId, Extraction x)
     {
         var lines = new List<string>();
-        var confirmLow = Env.GetOr("CONFIRM_LOW_CONFIDENCE", "true") != "false";
+        var confirmLow = Env.GetOr(Settings.ConfirmLowConfidence, "true") != "false";
         var today = JujuCalendar.TodayManila;
-        var pending = Db.Table("Pending");
 
         foreach (var ev in x.Events)
         {
@@ -183,7 +183,7 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
                     lines.Add($"⚠️ No date: {ev.Title}");
                     continue;
                 }
-                if (date < today) ev.Confidence = "low"; // past dates are usually a misread year
+                if (date < today) ev.Confidence = Confidence.Low; // past dates are usually a misread year
 
                 GEvent? match = null;
                 var nearby = await cal.NearbyAsync(date);
@@ -193,7 +193,7 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
                     match = nearby.FirstOrDefault(g => g.Id == matchId);
                 }
 
-                var mustAsk = match != null || (confirmLow && ev.Confidence == "low");
+                var mustAsk = match != null || (confirmLow && ev.Confidence == Confidence.Low);
                 if (!mustAsk)
                 {
                     await cal.InsertAsync(cal.Build(ev));
@@ -202,13 +202,7 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
                 }
 
                 // Hold the proposal until a button is tapped
-                var pid = Guid.NewGuid().ToString("N")[..12];
-                await pending.AddEntityAsync(new TableEntity("p", pid)
-                {
-                    ["EventJson"] = JsonSerializer.Serialize(ev),
-                    ["MatchId"] = match?.Id ?? "",
-                    ["Status"] = "pending"
-                });
+                var pid = await PendingStore.AddAsync(ev, match?.Id ?? "");
 
                 if (match != null)
                     await tg.SendAsync(chatId,
@@ -222,7 +216,7 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
             catch (Exception ex)
             {
                 log.LogError(ex, "Failed processing event {Title}", ev.Title);
-                lines.Add($"❌ {ev.Title}: {Short(ex)}");
+                lines.Add($"❌ {ev.Title}: {TextUtil.Short(ex)}");
             }
         }
 
@@ -261,8 +255,7 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
             var updated = await cal.UpdateAsync(id, cal.Build(ev), keepPrevious);
             return updated.Id;
         }
-        catch (Exception ex) when (ex is KeyNotFoundException ||
-            (ex is Google.GoogleApiException g && (g.HttpStatusCode == HttpStatusCode.NotFound || g.HttpStatusCode == HttpStatusCode.Gone)))
+        catch (Exception ex) when (ex is KeyNotFoundException || JujuCalendar.IsGone(ex))
         {
             var created = await cal.InsertAsync(cal.Build(ev));
             return created.Id;
@@ -280,26 +273,26 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
         if (chatId.ToString() != expected) { await tg.AnswerCallbackAsync(cbId); return; }
 
         var data = cb.TryGetProperty("data", out var dd) ? dd.GetString() ?? "" : "";
-        var bits = data.Split(':', 2);
-        if (bits.Length != 2) { await tg.AnswerCallbackAsync(cbId); return; }
-        var act = bits[0];
-        var pid = bits[1];
+        var sep = data.IndexOf(CallbackAction.Separator);
+        if (sep < 0) { await tg.AnswerCallbackAsync(cbId); return; }
+        var act = data[..sep];
+        var pid = data[(sep + 1)..];
 
-        var table = Db.Table("Pending");
+        var table = Db.Table(Tables.Pending);
         TableEntity p;
-        try { p = (await table.GetEntityAsync<TableEntity>("p", pid)).Value; }
-        catch (RequestFailedException e) when (e.Status == 404)
+        try { p = (await table.GetEntityAsync<TableEntity>(Tables.PendingPartition, pid)).Value; }
+        catch (RequestFailedException e) when (e.Status == (int)HttpStatusCode.NotFound)
         {
             await tg.AnswerCallbackAsync(cbId, "Expired");
             return;
         }
 
-        if (p.GetString("Status") != "pending") { await tg.AnswerCallbackAsync(cbId, "Already handled"); return; }
+        if (p.GetString(Columns.Status) != PendingStatus.Pending) { await tg.AnswerCallbackAsync(cbId, "Already handled"); return; }
 
         // Claim it so a double tap can't run twice (ETag makes the second write fail)
-        p["Status"] = "done";
+        p[Columns.Status] = PendingStatus.Done;
         try { await table.UpdateEntityAsync(p, p.ETag); }
-        catch (RequestFailedException e) when (e.Status == 412)
+        catch (RequestFailedException e) when (e.Status == (int)HttpStatusCode.PreconditionFailed)
         {
             await tg.AnswerCallbackAsync(cbId, "Already handled");
             return;
@@ -307,57 +300,62 @@ public class TelegramWebhook(ILlmClient llm, TelegramApi tg, JujuCalendar cal, S
 
         await tg.AnswerCallbackAsync(cbId);
 
-        var ev = JsonSerializer.Deserialize<ExtractedEvent>(p.GetString("EventJson")!)!;
-        var matchId = p.GetString("MatchId") ?? "";
-        var kind = p.GetString("Kind") ?? "tg";
-        var fromSheet = kind.StartsWith("sheet", StringComparison.Ordinal);
+        var ev = JsonSerializer.Deserialize<ExtractedEvent>(p.GetString(Columns.EventJson)!)!;
+        var matchId = p.GetString(Columns.MatchId) ?? "";
+        var kind = p.GetString(Columns.Kind) ?? PendingKind.Telegram;
+        var fromSheet = kind.StartsWith(PendingKind.SheetPrefix, StringComparison.Ordinal);
+        var changedOnSheet = kind == PendingKind.SheetChanged;
+
+        // Sheet proposals only: which Synced row to write back
+        var gid = p.GetString(Columns.Gid) ?? "";
+        var rk = p.GetString(Columns.Rk) ?? "";
+        var key = p.GetString(Columns.Key) ?? "";
+        var hash = p.GetString(Columns.Hash) ?? "";
+
         string result;
         try
         {
             switch (act)
             {
-                case "d" when kind == "sheet-del":
+                case CallbackAction.Delete when kind == PendingKind.SheetRemoved:
                     await cal.DeleteAsync(matchId);
-                    await SyncStore.MarkAsync(p.GetString("Gid")!, p.GetString("Rk")!, "removed");
+                    await SyncStore.MarkAsync(gid, rk, SyncStatus.Removed);
                     result = $"🗑 Deleted: {ev.Title}";
                     break;
-                case "s" when kind == "sheet-del":
-                    await SyncStore.MarkAsync(p.GetString("Gid")!, p.GetString("Rk")!, "kept");
+                case CallbackAction.Skip when kind == PendingKind.SheetRemoved:
+                    await SyncStore.MarkAsync(gid, rk, SyncStatus.Kept);
                     result = $"📌 Kept: {ev.Title}";
                     break;
-                case "s":
+                case CallbackAction.Skip:
                     result = $"⏭ Skipped: {ev.Title}";
+                    // A skipped change keeps its link to the existing event; a skipped new item has none
                     if (fromSheet)
-                        await SyncStore.SetAsync(p.GetString("Gid")!, p.GetString("Rk")!, p.GetString("Key")!, p.GetString("Hash")!,
-                            kind == "sheet-chg" ? matchId : "", kind == "sheet-chg" ? "synced" : "skipped", ev.Title);
+                        await SyncStore.SetAsync(gid, rk, key, hash,
+                            changedOnSheet ? matchId : "", changedOnSheet ? SyncStatus.Synced : SyncStatus.Skipped, ev.Title);
                     break;
-                case "u" when matchId.Length > 0:
-                    var linkedId = await UpdateOrInsertAsync(matchId, ev, keepPrevious: kind != "sheet-chg");
+                case CallbackAction.Update when matchId.Length > 0:
+                    var linkedId = await UpdateOrInsertAsync(matchId, ev, keepPrevious: !changedOnSheet);
                     result = $"✏️ Updated: {ev.Title}, {JujuCalendar.When(ev)}";
-                    if (fromSheet)
-                        await SyncStore.SetAsync(p.GetString("Gid")!, p.GetString("Rk")!, p.GetString("Key")!, p.GetString("Hash")!,
-                            linkedId, "synced", ev.Title);
+                    if (fromSheet) await SyncStore.SetAsync(gid, rk, key, hash, linkedId, SyncStatus.Synced, ev.Title);
                     break;
-                default:
+                default: // CallbackAction.AddNew
                     var created = await cal.InsertAsync(cal.Build(ev));
                     result = $"✅ Added: {ev.Title}, {JujuCalendar.When(ev)}";
-                    if (fromSheet)
-                        await SyncStore.SetAsync(p.GetString("Gid")!, p.GetString("Rk")!, p.GetString("Key")!, p.GetString("Hash")!,
-                            created.Id, "synced", ev.Title);
+                    if (fromSheet) await SyncStore.SetAsync(gid, rk, key, hash, created.Id, SyncStatus.Synced, ev.Title);
                     break;
             }
         }
         catch
         {
             // Let the buttons work again after a failure
-            try { p["Status"] = "pending"; await table.UpdateEntityAsync(p, ETag.All); } catch { }
+            try { p[Columns.Status] = PendingStatus.Pending; await table.UpdateEntityAsync(p, ETag.All); } catch { }
             throw;
         }
 
         // A moved item: its old row is done whichever way the user answered
-        var oldRk = p.GetString("OldRk");
+        var oldRk = p.GetString(Columns.OldRk);
         if (fromSheet && !string.IsNullOrEmpty(oldRk))
-            await SyncStore.MarkAsync(p.GetString("Gid")!, oldRk, "moved");
+            await SyncStore.MarkAsync(gid, oldRk, SyncStatus.Moved);
 
         await tg.EditAsync(chatId, messageId, result);
     }

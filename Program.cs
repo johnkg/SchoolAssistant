@@ -17,14 +17,14 @@ builder.Services.AddSingleton<SheetSync>();
 builder.Services.AddSingleton<AnthropicLlmClient>();
 builder.Services.AddSingleton<OpenAiLlmClient>();
 builder.Services.AddSingleton<ILlmClient>(sp =>
-    Environment.GetEnvironmentVariable("LLM_PROVIDER")?.Trim().ToLowerInvariant() switch
+    Environment.GetEnvironmentVariable(Settings.LlmProvider)?.Trim().ToLowerInvariant() switch
     {
         null or "" or "openai" => sp.GetRequiredService<OpenAiLlmClient>(),
         "anthropic" => sp.GetRequiredService<AnthropicLlmClient>(),
         var other => throw new InvalidOperationException($"Unknown LLM_PROVIDER '{other}'. Use 'openai' or 'anthropic'.")
     });
 
-if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("APPLICATIONINSIGHTS_CONNECTION_STRING")))
+if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(Settings.AppInsightsConnectionString)))
 {
     builder.Services.AddOpenTelemetry()
         .UseFunctionsWorkerDefaults()

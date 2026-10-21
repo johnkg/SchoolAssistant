@@ -8,12 +8,30 @@ namespace SchoolAssistant;
 /// <summary>One calendar-worthy cell (or run of identical adjacent cells) from the school tracker.</summary>
 public sealed record SheetItem(string Gid, string Subject, DateOnly Start, DateOnly End, string Text, string CellRef)
 {
+    // Stored in the Synced table: changing any of these orphans existing rows.
+    const char KeySeparator = '|';
+    const int RowKeyHexChars = 32;
+    const int HashHexChars = 16;
+
     // Identity: tab + subject + first day. Editing the text keeps the identity; moving it to another day does not.
-    public string Key => $"{Gid}|{Subject.ToUpperInvariant()}|{Start.ToString("yyyyMMdd", CultureInfo.InvariantCulture)}";
-    public string Rk => SheetParser.Sha(Key)[..32];
+    public string Key => $"{Gid}{KeySeparator}{Subject.ToUpperInvariant()}{KeySeparator}{Start.ToString(Formats.CompactDate, Formats.Inv)}";
+    public string Rk => SheetParser.Sha(Key)[..RowKeyHexChars];
 
     // Changes when the cell text or the end of the range changes.
-    public string Hash => SheetParser.Sha(SheetParser.Norm(Text) + "|" + End.ToString("yyyyMMdd", CultureInfo.InvariantCulture))[..16];
+    public string Hash => SheetParser.Sha(SheetParser.Norm(Text) + KeySeparator + End.ToString(Formats.CompactDate, Formats.Inv))[..HashHexChars];
+
+    /// <summary>Reads the subject and first day back out of a stored <see cref="Key"/>.</summary>
+    public static bool TryParseKey(string? key, out string subject, out DateOnly start)
+    {
+        subject = "";
+        start = default;
+        if (key is null) return false;
+        var first = key.IndexOf(KeySeparator);
+        var last = key.LastIndexOf(KeySeparator);
+        if (first < 0 || last <= first) return false;
+        subject = key[(first + 1)..last];
+        return DateOnly.TryParseExact(key[(last + 1)..], Formats.CompactDate, Formats.Inv, DateTimeStyles.None, out start);
+    }
 }
 
 /// <summary>
@@ -22,14 +40,21 @@ public sealed record SheetItem(string Gid, string Subject, DateOnly Start, DateO
 /// </summary>
 public static class SheetParser
 {
-    static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
-    static readonly Regex DateCell = new(@"^\s*([A-Za-z]{3,9})\.?\s+(\d{1,2})\s*$", RegexOptions.Compiled);
-    static readonly Regex MonthYearCell = new(@"^\s*([A-Za-z]{3,9})\s+(\d{4})\s*$", RegexOptions.Compiled);
+    const int MinDateCellsInHeader = 3;   // a row with fewer date cells is not the date header
+    const int YearSearchRowsAbove = 3;    // how far above the header to look for "October 2026"
+    const int YearSearchSpan = 1;         // with no year given, try last, this and next year
+    const int MidMonthDay = 15;           // compare months by their middle day when guessing the year
+    const int MonthAbbreviationLength = 3;
+    const int ColumnLetters = 26;
+
+    static readonly CultureInfo Inv = Formats.Inv;
+    static readonly Regex DateCell = new(@"^\s*(?<month>[A-Za-z]{3,9})\.?\s+(?<day>\d{1,2})\s*$", RegexOptions.Compiled);
+    static readonly Regex MonthYearCell = new(@"^\s*(?<month>[A-Za-z]{3,9})\s+(?<year>\d{4})\s*$", RegexOptions.Compiled);
     static readonly string[] Months = { "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec" };
 
     public static string Sha(string s) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(s)));
 
-    public static string Norm(string s) => Regex.Replace(s, @"\s+", " ").Trim().ToLowerInvariant();
+    public static string Norm(string s) => TextUtil.Flatten(s).ToLowerInvariant();
 
     // ---------- CSV ----------
     public static List<List<string>> ParseCsv(string s)
@@ -78,14 +103,14 @@ public static class SheetParser
             var row = rows[r];
 
             var header = HeaderCells(row);
-            if (header.Count >= 3)
+            if (header.Count >= MinDateCellsInHeader)
             {
                 cols = BuildCols(header, FindYear(rows, r), today);
                 continue;
             }
             if (cols is null || row.Count == 0) continue;
 
-            var subject = Regex.Replace(row[0], @"\s+", " ").Trim();
+            var subject = TextUtil.Flatten(row[0]);
             if (subject.Length == 0) continue; // weekday row, blank row
 
             var i = 0;
@@ -115,9 +140,9 @@ public static class SheetParser
         {
             var m = DateCell.Match(row[c]);
             if (!m.Success) continue;
-            var month = MonthOf(m.Groups[1].Value);
+            var month = MonthOf(m.Groups["month"].Value);
             if (month == 0) continue;
-            res.Add((c, month, int.Parse(m.Groups[2].Value, Inv)));
+            res.Add((c, month, int.Parse(m.Groups["day"].Value, Inv)));
         }
         return res;
     }
@@ -140,11 +165,11 @@ public static class SheetParser
     // "October 2026" near the header tells us the year.
     static int? FindYear(List<List<string>> rows, int headerRow)
     {
-        for (var r = headerRow; r >= Math.Max(0, headerRow - 3); r--)
+        for (var r = headerRow; r >= Math.Max(0, headerRow - YearSearchRowsAbove); r--)
             foreach (var cell in rows[r])
             {
                 var m = MonthYearCell.Match(cell);
-                if (m.Success && MonthOf(m.Groups[1].Value) != 0) return int.Parse(m.Groups[2].Value, Inv);
+                if (m.Success && MonthOf(m.Groups["month"].Value) != 0) return int.Parse(m.Groups["year"].Value, Inv);
             }
         return null;
     }
@@ -153,9 +178,9 @@ public static class SheetParser
     {
         var best = today.Year;
         var bestDiff = int.MaxValue;
-        for (var y = today.Year - 1; y <= today.Year + 1; y++)
+        for (var y = today.Year - YearSearchSpan; y <= today.Year + YearSearchSpan; y++)
         {
-            var diff = Math.Abs(new DateOnly(y, month, 15).DayNumber - today.DayNumber);
+            var diff = Math.Abs(new DateOnly(y, month, MidMonthDay).DayNumber - today.DayNumber);
             if (diff < bestDiff) { bestDiff = diff; best = y; }
         }
         return best;
@@ -164,18 +189,19 @@ public static class SheetParser
     static int MonthOf(string word)
     {
         var w = word.ToLowerInvariant();
-        if (w.Length < 3) return 0;
-        var i = Array.IndexOf(Months, w[..3]);
+        if (w.Length < MonthAbbreviationLength) return 0;
+        var i = Array.IndexOf(Months, w[..MonthAbbreviationLength]);
         if (i < 0) return 0;
-        var full = Inv.DateTimeFormat.GetMonthName(i + 1).ToLowerInvariant();
-        return w.Length == 3 || full.StartsWith(w, StringComparison.Ordinal) || w == "sept" ? i + 1 : 0;
+        var month = i + 1;
+        var full = Inv.DateTimeFormat.GetMonthName(month).ToLowerInvariant();
+        return w.Length == MonthAbbreviationLength || full.StartsWith(w, StringComparison.Ordinal) || w == "sept" ? month : 0;
     }
 
     static string ColName(int index)
     {
         var s = "";
-        for (var n = index + 1; n > 0; n = (n - 1) / 26)
-            s = (char)('A' + (n - 1) % 26) + s;
+        for (var n = index + 1; n > 0; n = (n - 1) / ColumnLetters)
+            s = (char)('A' + (n - 1) % ColumnLetters) + s;
         return s;
     }
 }

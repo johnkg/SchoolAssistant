@@ -170,5 +170,7 @@ Azure Functions Flex Consumption and Table Storage cost pennies at this volume. 
 | `JujuCalendar.cs` | Google Calendar client and event building |
 | `ILlmClient.cs`, `OpenAiLlmClient.cs`, `AnthropicLlmClient.cs` | LLM adapter |
 | `Telegram.cs` | Telegram API wrapper |
-| `Models.cs`, `Support.cs` | Event model and helpers |
+| `Models.cs`, `Support.cs` | Event model, event types, settings/text helpers |
+| `Constants.cs` | Setting, table, column and status names; date formats; Manila time |
+| `Stores.cs` | Table Storage access for pending proposals, sync state and sheet hashes |
 | `Program.cs` | Dependency registration |
