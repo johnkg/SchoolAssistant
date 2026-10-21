@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Azure.Data.Tables;
 
 namespace SchoolAssistant;
@@ -17,18 +18,34 @@ internal static class Db
     {
         // Flex Consumption uses identity-based storage (no AzureWebJobsStorage connection string),
         // so tables use their own connection string setting when present.
-        var cs = Environment.GetEnvironmentVariable("TABLES_CONNECTION_STRING");
-        if (string.IsNullOrEmpty(cs)) cs = Env.Get("AzureWebJobsStorage");
+        var cs = Environment.GetEnvironmentVariable(Settings.TablesConnectionString);
+        if (string.IsNullOrEmpty(cs)) cs = Env.Get(Settings.WebJobsStorage);
         var t = new TableClient(cs, name);
         t.CreateIfNotExists();
         return t;
     }
 }
 
+internal static class TextUtil
+{
+    const int ErrorMessageMaxChars = 200;
+
+    /// <summary>Collapses all whitespace (including line breaks) to single spaces.</summary>
+    public static string Flatten(string s) => Regex.Replace(s, @"\s+", " ").Trim();
+
+    /// <summary>Flattened and cut to at most <paramref name="max"/> characters, marked with an ellipsis.</summary>
+    public static string Flat(string s, int max) => Truncate(Flatten(s), max);
+
+    public static string Truncate(string s, int max) => s.Length > max ? s[..max] + Formats.Ellipsis : s;
+
+    /// <summary>An exception message short enough for a Telegram reply.</summary>
+    public static string Short(Exception ex) => Truncate(ex.Message.Replace("\n", " "), ErrorMessageMaxChars);
+}
+
 public static class LlmUtil
 {
     /// <summary>Today's date in Manila time, so "next Friday" resolves correctly.</summary>
-    public static string Today() => DateTimeOffset.UtcNow.AddHours(8).ToString("dddd, yyyy-MM-dd");
+    public static string Today() => ManilaTime.Now.ToString(Formats.LongDay, Formats.Inv);
 
     /// <summary>
     /// Cleans model output down to the first JSON value: drops code fences and anything the model

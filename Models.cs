@@ -3,10 +3,32 @@ using System.Text.Json.Serialization;
 
 namespace SchoolAssistant;
 
+/// <summary>Event types the extraction and naming prompts may return.</summary>
+public static class EventTypes
+{
+    public const string Birthday = "birthday";
+    public const string Event = "event";
+    public const string Quiz = "quiz";
+    public const string Exam = "exam";
+    public const string WrittenWork = "written_work";
+    public const string PerformanceTask = "performance_task";
+    public const string Deadline = "deadline";
+    public const string Other = "other";
+}
+
+public static class Confidence
+{
+    public const string High = "high";
+    public const string Medium = "medium";
+    public const string Low = "low";
+}
+
 public class ExtractedEvent
 {
-    public string Type { get; set; } = "event";
-    public string Title { get; set; } = "School event";
+    public const string DefaultTitle = "School event";
+
+    public string Type { get; set; } = EventTypes.Event;
+    public string Title { get; set; } = DefaultTitle;
     public string? Date { get; set; }
     public string? EndDate { get; set; }
     public string? StartTime { get; set; }
@@ -18,10 +40,10 @@ public class ExtractedEvent
     public string? Details { get; set; }
     public string? Body { get; set; } // announcement text for important events
     public string? Description { get; set; } // full description override (used for sheet items)
-    public string Confidence { get; set; } = "medium";
+    public string Confidence { get; set; } = SchoolAssistant.Confidence.Medium;
 
-    [JsonIgnore] public bool IsBirthday => Type == "birthday";
-    [JsonIgnore] public bool IsAssessment => Type is "quiz" or "exam" or "written_work" or "performance_task";
+    [JsonIgnore] public bool IsBirthday => Type == EventTypes.Birthday;
+    [JsonIgnore] public bool IsAssessment => Type is EventTypes.Quiz or EventTypes.Exam or EventTypes.WrittenWork or EventTypes.PerformanceTask;
 }
 
 public record Extraction(List<ExtractedEvent> Events, string? Note)
@@ -41,8 +63,8 @@ public record Extraction(List<ExtractedEvent> Events, string? Note)
                 if (e.ValueKind != JsonValueKind.Object) continue;
                 list.Add(new ExtractedEvent
                 {
-                    Type = (Str(e, "type") ?? "event").ToLowerInvariant().Replace(' ', '_').Replace('-', '_'),
-                    Title = Str(e, "title") ?? "School event",
+                    Type = (Str(e, "type") ?? EventTypes.Event).ToLowerInvariant().Replace(' ', '_').Replace('-', '_'),
+                    Title = Str(e, "title") ?? ExtractedEvent.DefaultTitle,
                     Date = Str(e, "date"),
                     EndDate = Str(e, "end_date"),
                     StartTime = Str(e, "start_time"),
@@ -53,7 +75,7 @@ public record Extraction(List<ExtractedEvent> Events, string? Note)
                     References = Strs(e, "references"),
                     Details = Str(e, "details"),
                     Body = Str(e, "body"),
-                    Confidence = (Str(e, "confidence") ?? "medium").ToLowerInvariant()
+                    Confidence = (Str(e, "confidence") ?? SchoolAssistant.Confidence.Medium).ToLowerInvariant()
                 });
             }
         }

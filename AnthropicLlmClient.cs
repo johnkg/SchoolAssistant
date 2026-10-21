@@ -5,6 +5,11 @@ namespace SchoolAssistant;
 
 public class AnthropicLlmClient(IHttpClientFactory factory) : ILlmClient
 {
+    const string Endpoint = "https://api.anthropic.com/v1/messages";
+    const string ApiVersion = "2023-06-01";
+    const string DefaultModel = "claude-haiku-4-5-20251001";
+    const int MaxTokens = 4000;
+
     public async Task<string> AskAsync(string system, IReadOnlyList<LlmPart> parts, CancellationToken ct = default)
     {
         var content = parts.Select<LlmPart, object>(p => p switch
@@ -17,16 +22,16 @@ public class AnthropicLlmClient(IHttpClientFactory factory) : ILlmClient
 
         var body = JsonSerializer.Serialize(new
         {
-            model = Env.GetOr("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
-            max_tokens = 4000,
+            model = Env.GetOr(Settings.AnthropicModel, DefaultModel),
+            max_tokens = MaxTokens,
             system,
             messages = new[] { new { role = "user", content } }
         });
 
-        var req = new HttpRequestMessage(HttpMethod.Post, "https://api.anthropic.com/v1/messages")
+        var req = new HttpRequestMessage(HttpMethod.Post, Endpoint)
         { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-        req.Headers.Add("x-api-key", Env.Get("ANTHROPIC_API_KEY"));
-        req.Headers.Add("anthropic-version", "2023-06-01");
+        req.Headers.Add("x-api-key", Env.Get(Settings.AnthropicApiKey));
+        req.Headers.Add("anthropic-version", ApiVersion);
 
         var res = await factory.CreateClient().SendAsync(req, ct);
         var json = await res.Content.ReadAsStringAsync(ct);

@@ -7,6 +7,9 @@ namespace SchoolAssistant;
 // Uses the Chat Completions endpoint. Model ID comes from the OPENAI_MODEL setting.
 public class OpenAiLlmClient(IHttpClientFactory factory) : ILlmClient
 {
+    const string Endpoint = "https://api.openai.com/v1/chat/completions";
+    const int MaxCompletionTokens = 4000; // reasoning tokens count toward this too
+
     public async Task<string> AskAsync(string system, IReadOnlyList<LlmPart> parts, CancellationToken ct = default)
     {
         var content = parts.Select<LlmPart, object>(p => p switch
@@ -19,8 +22,8 @@ public class OpenAiLlmClient(IHttpClientFactory factory) : ILlmClient
 
         var body = JsonSerializer.Serialize(new
         {
-            model = Env.Get("OPENAI_MODEL"),
-            max_completion_tokens = 4000, // newer/reasoning models reject max_tokens; reasoning also counts toward this
+            model = Env.Get(Settings.OpenAiModel),
+            max_completion_tokens = MaxCompletionTokens, // newer/reasoning models reject max_tokens
             messages = new object[]
             {
                 new { role = "system", content = system },
@@ -28,9 +31,9 @@ public class OpenAiLlmClient(IHttpClientFactory factory) : ILlmClient
             }
         });
 
-        var req = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/chat/completions")
+        var req = new HttpRequestMessage(HttpMethod.Post, Endpoint)
         { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Env.Get("OPENAI_API_KEY"));
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Env.Get(Settings.OpenAiApiKey));
 
         var res = await factory.CreateClient().SendAsync(req, ct);
         var json = await res.Content.ReadAsStringAsync(ct);
