@@ -1,7 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
-
-  <!-- Azure Functions build SDK: an MSBuild SDK, so it is declared here, not as a PackageReference -->
-  <Sdk Name="Azure.Functions.Sdk" Version="1.0.1" />
+﻿<Project Sdk="Azure.Functions.Sdk/1.0.1">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
