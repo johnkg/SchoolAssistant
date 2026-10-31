@@ -11,14 +11,14 @@ public sealed record SheetItem(string Gid, string Subject, DateOnly Start, DateO
     // Stored in the Synced table: changing any of these orphans existing rows.
     const char KeySeparator = '|';
     const int RowKeyHexChars = 32;
-    const int HashHexChars = 16;
+    public const int ContentHashHexChars = 16;
 
     // Identity: tab + subject + first day. Editing the text keeps the identity; moving it to another day does not.
-    public string Key => $"{Gid}{KeySeparator}{Subject.ToUpperInvariant()}{KeySeparator}{Start.ToString(Formats.CompactDate, Formats.Inv)}";
-    public string Rk => SheetParser.Sha(Key)[..RowKeyHexChars];
+    public string Key => $"{Gid}{KeySeparator}{Subject.ToUpperInvariant()}{KeySeparator}{DateText.Compact(Start)}";
+    public string Rk => SheetParser.Sha(Key, RowKeyHexChars);
 
     // Changes when the cell text or the end of the range changes.
-    public string Hash => SheetParser.Sha(SheetParser.Norm(Text) + KeySeparator + End.ToString(Formats.CompactDate, Formats.Inv))[..HashHexChars];
+    public string Hash => SheetParser.Sha(SheetParser.Norm(Text) + KeySeparator + DateText.Compact(End), ContentHashHexChars);
 
     /// <summary>Reads the subject and first day back out of a stored <see cref="Key"/>.</summary>
     public static bool TryParseKey(string? key, out string subject, out DateOnly start)
@@ -46,13 +46,14 @@ public static class SheetParser
     const int MidMonthDay = 15;           // compare months by their middle day when guessing the year
     const int MonthAbbreviationLength = 3;
     const int ColumnLetters = 26;
+    const string SeptemberAlias = "sept";
 
     static readonly CultureInfo Inv = Formats.Inv;
     static readonly Regex DateCell = new(@"^\s*(?<month>[A-Za-z]{3,9})\.?\s+(?<day>\d{1,2})\s*$", RegexOptions.Compiled);
     static readonly Regex MonthYearCell = new(@"^\s*(?<month>[A-Za-z]{3,9})\s+(?<year>\d{4})\s*$", RegexOptions.Compiled);
     static readonly string[] Months = { "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec" };
 
-    public static string Sha(string s) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(s)));
+    public static string Sha(string s, int hexChars) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(s)))[..hexChars];
 
     public static string Norm(string s) => TextUtil.Flatten(s).ToLowerInvariant();
 
@@ -194,7 +195,7 @@ public static class SheetParser
         if (i < 0) return 0;
         var month = i + 1;
         var full = Inv.DateTimeFormat.GetMonthName(month).ToLowerInvariant();
-        return w.Length == MonthAbbreviationLength || full.StartsWith(w, StringComparison.Ordinal) || w == "sept" ? month : 0;
+        return w.Length == MonthAbbreviationLength || full.StartsWith(w, StringComparison.Ordinal) || w == SeptemberAlias ? month : 0;
     }
 
     static string ColName(int index)

@@ -101,6 +101,27 @@ internal static class CallbackAction
     public const string Delete = "d";
 }
 
+/// <summary>Values for the LLM_PROVIDER setting.</summary>
+internal static class LlmProviders
+{
+    public const string OpenAi = "openai";
+    public const string Anthropic = "anthropic";
+}
+
+internal static class MimeTypes
+{
+    public const string Pdf = "application/pdf";
+    public const string Jpeg = "image/jpeg";
+    public const string Png = "image/png";
+    public const string Json = "application/json";
+}
+
+/// <summary>Google Calendar rules the code relies on.</summary>
+internal static class CalendarConventions
+{
+    public const int AllDayEndOffsetDays = 1; // an all-day event's end date is exclusive
+}
+
 /// <summary>Date and time formats used for storage, the LLM and Telegram text.</summary>
 internal static class Formats
 {

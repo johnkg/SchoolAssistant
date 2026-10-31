@@ -165,12 +165,15 @@ Azure Functions Flex Consumption and Table Storage cost pennies at this volume. 
 
 | File | Role |
 |---|---|
-| `Functions.cs` | Telegram webhook, extraction, confirmation flow |
+| `Functions.cs` | Telegram webhook: auth, chat filter, routing, attachment download |
+| `AnnouncementProcessor.cs` | Announcement -> LLM extraction -> calendar or a question |
+| `ButtonHandler.cs` | Carries out a proposal when its button is tapped |
 | `SheetSync.cs`, `SheetParser.cs` | Hourly and manual sheet sync, grid parsing |
-| `JujuCalendar.cs` | Google Calendar client and event building |
-| `ILlmClient.cs`, `OpenAiLlmClient.cs`, `AnthropicLlmClient.cs` | LLM adapter |
-| `Telegram.cs` | Telegram API wrapper |
-| `Models.cs`, `Support.cs` | Event model, event types, settings/text helpers |
-| `Constants.cs` | Setting, table, column and status names; date formats; Manila time |
-| `Stores.cs` | Table Storage access for pending proposals, sync state and sheet hashes |
+| `JujuCalendar.cs` | Google Calendar API client |
+| `CalendarEventBuilder.cs`, `EventText.cs` | Build calendar events; short event text for chat and prompts |
+| `ILlmClient.cs`, `OpenAiLlmClient.cs`, `AnthropicLlmClient.cs` | LLM adapter and shared HTTP handling |
+| `Telegram.cs` | Telegram API wrapper and inline buttons |
+| `Models.cs`, `Support.cs` | Event model, event types, settings/date/text helpers |
+| `Constants.cs` | Setting, table, column and status names; formats; Manila time |
+| `Stores.cs` | Table Storage access: seen messages, pending proposals, sync state |
 | `Program.cs` | Dependency registration |

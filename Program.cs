@@ -12,16 +12,19 @@ builder.Services.AddHttpClient();
 builder.Services.AddSingleton<TelegramApi>();
 builder.Services.AddSingleton<JujuCalendar>();
 builder.Services.AddSingleton<SheetSync>();
+builder.Services.AddSingleton<AnnouncementProcessor>();
+builder.Services.AddSingleton<ButtonHandler>();
 
 // LLM adapters: pick one with the LLM_PROVIDER setting ("openai" or "anthropic")
 builder.Services.AddSingleton<AnthropicLlmClient>();
 builder.Services.AddSingleton<OpenAiLlmClient>();
 builder.Services.AddSingleton<ILlmClient>(sp =>
-    Environment.GetEnvironmentVariable(Settings.LlmProvider)?.Trim().ToLowerInvariant() switch
+    Env.GetOr(Settings.LlmProvider, LlmProviders.OpenAi).Trim().ToLowerInvariant() switch
     {
-        null or "" or "openai" => sp.GetRequiredService<OpenAiLlmClient>(),
-        "anthropic" => sp.GetRequiredService<AnthropicLlmClient>(),
-        var other => throw new InvalidOperationException($"Unknown LLM_PROVIDER '{other}'. Use 'openai' or 'anthropic'.")
+        LlmProviders.OpenAi => sp.GetRequiredService<OpenAiLlmClient>(),
+        LlmProviders.Anthropic => sp.GetRequiredService<AnthropicLlmClient>(),
+        var other => throw new InvalidOperationException(
+            $"Unknown {Settings.LlmProvider} '{other}'. Use '{LlmProviders.OpenAi}' or '{LlmProviders.Anthropic}'.")
     });
 
 if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(Settings.AppInsightsConnectionString)))
