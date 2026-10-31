@@ -22,7 +22,14 @@ internal static class Env
 
 internal static class Db
 {
-    public static TableClient Table(string name)
+    /// <summary>How table clients are made. Tests replace it with an in-memory fake.</summary>
+    public static Func<string, TableClient> TableFactory { get; set; } = CreateTable;
+
+    public static TableClient Table(string name) => TableFactory(name);
+
+    // Talks to Azure Storage, so it can't run in unit tests; tests swap TableFactory instead.
+    [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
+    static TableClient CreateTable(string name)
     {
         // Flex Consumption uses identity-based storage (no AzureWebJobsStorage connection string),
         // so tables use their own connection string setting when present.

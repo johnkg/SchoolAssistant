@@ -144,6 +144,16 @@ Check it with `getWebhookInfo` (look at `last_error_message`). The host name is 
 - Send `/sync` to sync the Google Sheet immediately. It also runs hourly and skips work if the sheet hasn't changed.
 - Capturing from Viber: use the share sheet manually, or an Android automation app such as Tasker to remind you when a Viber notification arrives.
 
+## Tests
+
+```bash
+dotnet test SchoolAssistant.Tests
+# with coverage (cobertura XML under ./TestResults)
+dotnet test SchoolAssistant.Tests --settings SchoolAssistant.Tests/coverage.runsettings --collect:"XPlat Code Coverage"
+```
+
+The tests use in-memory fakes for Table Storage, the Google Calendar API, Telegram and the LLM, so they need no network or Azure resources. CI runs them before publishing. `Program.cs` (dependency registration) and the Azure `TableClient` factory in `Support.cs` are the only code not covered.
+
 ## Cost
 
 Azure Functions Flex Consumption and Table Storage cost pennies at this volume. The main cost is LLM calls, which stay small with a compact model and one call per message (sheet sync adds one or two calls per changed run).

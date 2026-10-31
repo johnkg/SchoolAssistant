@@ -19,10 +19,15 @@ public class JujuCalendar
     const int NearbyMaxResults = 50;
     const int RangeMaxResults = 250;
 
-    readonly Lazy<GCal.CalendarService> _service = new(CreateService);
+    readonly Lazy<GCal.CalendarService> _service;
     static string CalendarId => Env.Get(Settings.CalendarId);
 
-    static GCal.CalendarService CreateService()
+    public JujuCalendar() => _service = new(CreateService);
+
+    /// <summary>For tests: use an already-built service (for example one backed by a fake HTTP handler).</summary>
+    internal JujuCalendar(GCal.CalendarService service) => _service = new(service);
+
+    internal static GCal.CalendarService CreateService()
     {
         // GOOGLE_SA_JSON is the service account key file: raw JSON, or the same thing base64-encoded.
         var raw = Env.Get(Settings.GoogleServiceAccountJson).Trim();

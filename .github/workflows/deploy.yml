@@ -21,6 +21,9 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      - name: Test
+        run: dotnet test SchoolAssistant.Tests
+
       - name: Publish
         run: dotnet publish SchoolAssistant.csproj -c Release -o ${{ env.PUBLISH_DIR }}
 

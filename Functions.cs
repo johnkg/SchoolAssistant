@@ -32,7 +32,10 @@ public class TelegramWebhook(
         try
         {
             using var doc = JsonDocument.Parse(await req.ReadAsStringAsync() ?? "{}");
-            replyChatId = await RouteAsync(doc.RootElement);
+            var update = doc.RootElement;
+            var chatId = ChatIdOf(update);
+            if (chatId == Env.TelegramChatId) replyChatId = chatId; // set first, so a failure below can be reported
+            await RouteAsync(update, chatId);
         }
         catch (Exception ex)
         {
@@ -42,37 +45,40 @@ public class TelegramWebhook(
         return req.CreateResponse(HttpStatusCode.OK); // always 200 so Telegram doesn't retry forever
     }
 
-    /// <summary>Handles one update. Returns the chat to report errors to (only the configured chat), if any.</summary>
-    async Task<long?> RouteAsync(JsonElement update)
+    /// <summary>The chat a button tap or message came from, if the update has one.</summary>
+    static long? ChatIdOf(JsonElement update)
+    {
+        if (update.TryGetProperty("callback_query", out var callback))
+            return callback.TryGetProperty("message", out var tappedMessage) ? TelegramUpdate.ChatOf(tappedMessage) : null;
+        return update.TryGetProperty("message", out var message) ? TelegramUpdate.ChatOf(message) : null;
+    }
+
+    async Task RouteAsync(JsonElement update, long? chatId)
     {
         var allowedChatId = Env.TelegramChatId;
 
         if (update.TryGetProperty("callback_query", out var callback))
         {
-            var fromAllowedChat = callback.TryGetProperty("message", out var callbackMessage)
-                                  && TelegramUpdate.ChatOf(callbackMessage) == allowedChatId;
-            if (fromAllowedChat) await buttons.HandleAsync(callback);
+            if (chatId == allowedChatId) await buttons.HandleAsync(callback);
             else await AnswerAndIgnoreAsync(callback);
-            return fromAllowedChat ? allowedChatId : null;
+            return;
         }
 
-        if (!update.TryGetProperty("message", out var message))
+        if (chatId is not long messageChatId)
         {
             log.LogWarning("Update has no 'message' field, ignoring");
-            return null;
+            return;
         }
 
-        var chatId = TelegramUpdate.ChatOf(message);
-        if (chatId != allowedChatId)
+        if (messageChatId != allowedChatId)
         {
-            log.LogWarning("Ignoring chat {ChatId}; {Setting} is {Expected}", chatId, Settings.TelegramChatId, allowedChatId);
+            log.LogWarning("Ignoring chat {ChatId}; {Setting} is {Expected}", messageChatId, Settings.TelegramChatId, allowedChatId);
             if (Env.GetFlag(Settings.DebugReplies, defaultValue: false))
-                await telegram.SendAsync(chatId, $"⚠️ This chat's ID is {chatId}, but {Settings.TelegramChatId} is {allowedChatId}.");
-            return null;
+                await telegram.SendAsync(messageChatId, $"⚠️ This chat's ID is {messageChatId}, but {Settings.TelegramChatId} is {allowedChatId}.");
+            return;
         }
 
-        await HandleMessageAsync(chatId, update.GetProperty("update_id").GetInt64().ToString(), message);
-        return chatId;
+        await HandleMessageAsync(messageChatId, update.GetProperty("update_id").GetInt64().ToString(), update.GetProperty("message"));
     }
 
     async Task HandleMessageAsync(long chatId, string updateId, JsonElement message)
