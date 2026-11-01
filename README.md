@@ -4,6 +4,8 @@ Turns school announcements (shared from Viber to a private Telegram bot) and a s
 
 Built with Azure Functions (.NET 10, isolated worker), Azure Table Storage, Telegram Bot API, an LLM (OpenAI or Anthropic, swappable) and the Google Calendar API.
 
+> New to the code? Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the flow in plain words, every file explained, and how to maintain the app.
+
 ## How it works
 
 ```
