@@ -5,6 +5,36 @@ using Azure.Data.Tables;
 
 namespace SchoolAssistant;
 
+/// <summary>Telegram updates already seen (Messages table), so a repeated delivery is processed once.</summary>
+internal static class MessageStore
+{
+    /// <summary>Records the update. Returns false if it was recorded before.</summary>
+    public static async Task<bool> TryRecordAsync(string updateId, string text)
+    {
+        try
+        {
+            await Db.Table(Tables.Messages).AddEntityAsync(new TableEntity(Tables.MessagesPartition, updateId) { [Columns.Text] = text });
+            return true;
+        }
+        catch (RequestFailedException e) when (e.Status == (int)HttpStatusCode.Conflict) { return false; }
+    }
+
+    public static Task SaveResultAsync(string updateId, string resultJson) =>
+        Db.Table(Tables.Messages).UpdateEntityAsync(
+            new TableEntity(Tables.MessagesPartition, updateId) { [Columns.ResultJson] = resultJson }, ETag.All, TableUpdateMode.Merge);
+}
+
+/// <summary>A saved proposal, read back when its button is tapped. Sheet columns are empty for Telegram proposals.</summary>
+internal sealed record Proposal(
+    ExtractedEvent Event, string MatchId, string Kind, string Gid, string Rk, string Key, string Hash, string OldRk)
+{
+    public bool FromSheet => Kind.StartsWith(PendingKind.SheetPrefix, StringComparison.Ordinal);
+    public bool ChangedOnSheet => Kind == PendingKind.SheetChanged;
+    public bool RemovedFromSheet => Kind == PendingKind.SheetRemoved;
+}
+
+internal enum ClaimOutcome { Claimed, Expired, AlreadyHandled }
+
 /// <summary>Proposals waiting for a button tap (Pending table).</summary>
 internal static class PendingStore
 {
@@ -26,12 +56,42 @@ internal static class PendingStore
         await Db.Table(Tables.Pending).AddEntityAsync(row);
         return id;
     }
+
+    /// <summary>
+    /// Marks the proposal done so a double tap can't run twice (the ETag makes the second write fail).
+    /// Returns the proposal only when this call won the claim.
+    /// </summary>
+    public static async Task<(ClaimOutcome Outcome, Proposal? Proposal)> ClaimAsync(string id)
+    {
+        var table = Db.Table(Tables.Pending);
+        TableEntity row;
+        try { row = (await table.GetEntityAsync<TableEntity>(Tables.PendingPartition, id)).Value; }
+        catch (RequestFailedException e) when (e.Status == (int)HttpStatusCode.NotFound) { return (ClaimOutcome.Expired, null); }
+
+        if (row.GetString(Columns.Status) != PendingStatus.Pending) return (ClaimOutcome.AlreadyHandled, null);
+
+        row[Columns.Status] = PendingStatus.Done;
+        try { await table.UpdateEntityAsync(row, row.ETag); }
+        catch (RequestFailedException e) when (e.Status == (int)HttpStatusCode.PreconditionFailed) { return (ClaimOutcome.AlreadyHandled, null); }
+
+        return (ClaimOutcome.Claimed, new Proposal(
+            JsonSerializer.Deserialize<ExtractedEvent>(row.GetString(Columns.EventJson))!,
+            Text(row, Columns.MatchId), row.GetString(Columns.Kind) ?? PendingKind.Telegram,
+            Text(row, Columns.Gid), Text(row, Columns.Rk), Text(row, Columns.Key), Text(row, Columns.Hash), Text(row, Columns.OldRk)));
+    }
+
+    /// <summary>Lets the buttons work again after the action failed.</summary>
+    public static Task ReleaseAsync(string id) =>
+        Db.Table(Tables.Pending).UpdateEntityAsync(
+            new TableEntity(Tables.PendingPartition, id) { [Columns.Status] = PendingStatus.Pending }, ETag.All, TableUpdateMode.Merge);
+
+    static string Text(TableEntity row, string column) => row.GetString(column) ?? "";
 }
 
 /// <summary>What we've already done for each sheet item (Synced table, one row per tab + subject + first day).</summary>
 internal static class SyncStore
 {
-    const string Yes = "1";
+    const string FlagSet = "1"; // stored value of a yes/no column
 
     public static Task SetAsync(string gid, string rk, string key, string hash, string eventId, string status, string title) =>
         Db.Table(Tables.Synced).UpsertEntityAsync(new TableEntity(gid, rk)
@@ -54,9 +114,9 @@ internal static class SyncStore
 
     // Remember that we asked what to do about a vanished item, so we don't ask again every hour.
     public static Task GoneAskedAsync(string gid, string rk) =>
-        Db.Table(Tables.Synced).UpsertEntityAsync(new TableEntity(gid, rk) { [Columns.GoneAsked] = Yes }, TableUpdateMode.Merge);
+        Db.Table(Tables.Synced).UpsertEntityAsync(new TableEntity(gid, rk) { [Columns.GoneAsked] = FlagSet }, TableUpdateMode.Merge);
 
-    public static bool IsGoneAsked(TableEntity row) => row.GetString(Columns.GoneAsked) == Yes;
+    public static bool IsGoneAsked(TableEntity row) => row.GetString(Columns.GoneAsked) == FlagSet;
 
     // Remember that we asked about this version, so we don't ask again every hour.
     public static Task AskedAsync(string gid, string rk, string key, string askedHash) =>

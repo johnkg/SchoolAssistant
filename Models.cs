@@ -12,7 +12,6 @@ public static class EventTypes
     public const string Exam = "exam";
     public const string WrittenWork = "written_work";
     public const string PerformanceTask = "performance_task";
-    public const string Deadline = "deadline";
     public const string Other = "other";
 }
 

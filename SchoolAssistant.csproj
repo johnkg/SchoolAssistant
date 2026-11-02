@@ -1,4 +1,4 @@
-﻿<Project Sdk="Azure.Functions.Sdk/1.0.1">
+<Project Sdk="Azure.Functions.Sdk/1.0.1">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -24,6 +24,16 @@
     <PackageReference Include="Microsoft.Azure.Functions.Worker.OpenTelemetry" Version="1.2.0" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" />
     <PackageReference Include="Azure.Monitor.OpenTelemetry.Exporter" Version="1.7.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The test project lives in a subfolder; keep its sources and build output out of the function app and its package. -->
+    <Compile Remove="SchoolAssistant.Tests/**" />
+    <Content Remove="SchoolAssistant.Tests/**" />
+    <None Remove="SchoolAssistant.Tests/**" />
+    <EmbeddedResource Remove="SchoolAssistant.Tests/**" />
+    <InternalsVisibleTo Include="SchoolAssistant.Tests" />
+    <InternalsVisibleTo Include="DynamicProxyGenAssembly2" />
   </ItemGroup>
 
   <ItemGroup>

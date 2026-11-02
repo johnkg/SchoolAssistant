@@ -9,19 +9,18 @@ namespace SchoolAssistant;
 
 public class SheetPollTimer(SheetSync sync)
 {
-    const string Hourly = "0 0 * * * *";
+    const string Hourly = "0 0 * * * *"; // NCRONTAB: top of every hour
 
     [Function("sheet-poll")]
     public Task Run([TimerTrigger(Hourly)] TimerInfo timer) =>
-        sync.RunAsync(long.Parse(Env.Get(Settings.TelegramChatId)), manual: false);
+        sync.RunAsync(Env.TelegramChatId, manual: false);
 }
 
-public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpClientFactory http, ILogger<SheetSync> log)
+public class SheetSync(ILlmClient llm, TelegramApi telegram, JujuCalendar calendar, IHttpClientFactory httpFactory, ILogger<SheetSync> log)
 {
     /// <summary>Footer added to each event description; also used to read the cell text back out.</summary>
     public const string SourceFooter = "— School tracker sheet";
 
-    const int CsvHashHexChars = 16;
     const int MatchWindowDays = 7;          // look this far either side of an item for similar calendar events
     const int MaxCandidatesPerItem = 12;    // existing events shown to the LLM per new item
     const int AddedPreviewCount = 8;        // "added" lines listed in the summary before "…and N more"
@@ -58,7 +57,7 @@ public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpCl
     {
         if (!await Gate.WaitAsync(TimeSpan.Zero))
         {
-            if (manual) await tg.SendAsync(chatId, "⏳ A sync is already running.");
+            if (manual) await telegram.SendAsync(chatId, "⏳ A sync is already running.");
             return;
         }
         try
@@ -70,7 +69,7 @@ public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpCl
                 .ToList();
             if (sheetId.Length == 0 || gids.Count == 0)
             {
-                if (manual) await tg.SendAsync(chatId, $"⚠️ Set {Settings.SheetId} and {Settings.SheetGids} first.");
+                if (manual) await telegram.SendAsync(chatId, $"⚠️ Set {Settings.SheetId} and {Settings.SheetGids} first.");
                 return;
             }
 
@@ -86,17 +85,31 @@ public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpCl
             }
 
             if (lines.Count == 0 && manual) lines.Add("📊 Sheet is up to date.");
-            if (lines.Count > 0) await tg.SendAsync(chatId, string.Join("\n", lines));
+            if (lines.Count > 0) await telegram.SendAsync(chatId, string.Join("\n", lines));
         }
         finally { Gate.Release(); }
     }
 
+    /// <summary>What one tab's sync reports back, and whether anything failed (so the sheet is retried next time).</summary>
+    sealed class TabReport(bool manual, ILogger log)
+    {
+        public List<string> Lines { get; } = new();
+        public bool Failed { get; private set; }
+
+        public void Fail(Exception ex, string what, string line)
+        {
+            Failed = true;
+            log.LogError(ex, "Sheet {What} failed", what);
+            if (manual) Lines.Add(line);
+        }
+    }
+
     async Task SyncTabAsync(long chatId, string sheetId, string gid, bool manual, List<string> lines)
     {
-        var today = JujuCalendar.TodayManila;
+        var today = ManilaTime.Today;
 
         var csv = await DownloadCsvAsync(sheetId, gid);
-        var csvHash = SheetParser.Sha(csv)[..CsvHashHexChars];
+        var csvHash = SheetParser.Sha(csv, SheetItem.ContentHashHexChars);
         if (!manual && await SheetStateStore.GetCsvHashAsync(gid) == csvHash) return; // unchanged since the last complete pass
 
         // Upcoming items only; the past is never back-filled
@@ -123,89 +136,101 @@ public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpCl
             return;
         }
 
-        // One LLM call names everything new or changed
-        var all = fresh.Concat(changed.Select(c => c.Item)).ToList();
-        var named = all.Count > 0 ? await NameItemsAsync(all) : new List<(string Title, string Type)>(); // nothing to name when items only vanished
-        var events = all.Select((it, i) => ToEvent(it, named[i].Title, named[i].Type)).ToList();
+        // One LLM call names everything new or changed (nothing to name when items only vanished)
+        var allItems = fresh.Concat(changed.Select(c => c.Item)).ToList();
+        var names = allItems.Count > 0 ? await NameItemsAsync(allItems) : new List<(string Title, string Type)>();
+        var allEvents = allItems.Select((item, i) => ToEvent(item, names[i].Title, names[i].Type)).ToList();
+        var freshEvents = allEvents.Take(fresh.Count).ToList();
+        var changedEvents = allEvents.Skip(fresh.Count).ToList();
+
+        var report = new TabReport(manual, log);
+        var addedLines = await AddOrAskAboutNewItemsAsync(chatId, gid, fresh, freshEvents, synced, report);
+        await AskAboutChangesAsync(chatId, changed, changedEvents, goneEvents, report);
+        await AskAboutRemovalsAsync(chatId, gid, gone, report);
+
+        lines.AddRange(report.Lines);
+        if (addedLines.Count > 0)
+        {
+            lines.Add($"📊 Sheet: {addedLines.Count} added");
+            lines.AddRange(addedLines.Take(AddedPreviewCount));
+            if (addedLines.Count > AddedPreviewCount) lines.Add($"…and {addedLines.Count - AddedPreviewCount} more");
+        }
+
+        if (!report.Failed) await SheetStateStore.SaveCsvHashAsync(gid, csvHash); // otherwise retry next time
+    }
+
+    /// <summary>Adds items with no look-alike on the calendar; asks about the rest. Returns a summary line per added item.</summary>
+    async Task<List<string>> AddOrAskAboutNewItemsAsync(
+        long chatId, string gid, List<SheetItem> fresh, List<ExtractedEvent> freshEvents,
+        Dictionary<string, TableEntity> synced, TabReport report)
+    {
+        var addedLines = new List<string>();
+        if (fresh.Count == 0) return addedLines;
 
         // One LLM call checks new items against events already on the calendar
-        var matches = new Dictionary<int, GEvent>();
-        if (fresh.Count > 0)
-        {
-            var existing = await cal.ListRangeAsync(
-                fresh.Min(i => i.Start).AddDays(-MatchWindowDays), fresh.Max(i => i.End).AddDays(MatchWindowDays));
-            var linked = synced.Values.Select(r => r.GetString(Columns.EventId)).Where(s => !string.IsNullOrEmpty(s)).ToHashSet();
-            var pool = existing.Where(g => !linked.Contains(g.Id)).ToList();
-            matches = await FindMatchesAsync(fresh, events, pool);
-        }
-
-        var failed = false;
-        var added = new List<string>();
-
-        void Fail(Exception ex, string what, string line)
-        {
-            failed = true;
-            log.LogError(ex, "Sheet {What} failed", what);
-            if (manual) lines.Add(line);
-        }
+        var existing = await calendar.ListRangeAsync(
+            fresh.Min(i => i.Start).AddDays(-MatchWindowDays), fresh.Max(i => i.End).AddDays(MatchWindowDays));
+        var linkedEventIds = synced.Values.Select(r => r.GetString(Columns.EventId)).Where(id => !string.IsNullOrEmpty(id)).ToHashSet();
+        var unlinked = existing.Where(g => !linkedEventIds.Contains(g.Id)).ToList();
+        var matches = await FindMatchesAsync(fresh, freshEvents, unlinked);
 
         for (var i = 0; i < fresh.Count; i++)
         {
-            var it = fresh[i];
-            var ev = events[i];
+            var item = fresh[i];
+            var extracted = freshEvents[i];
             try
             {
-                if (matches.TryGetValue(i, out var hit))
+                if (matches.TryGetValue(i, out var similar))
                 {
-                    await PromptAsync(chatId, PendingKind.SheetNew, it, ev, hit.Id,
-                        $"❓ Similar event on calendar:\n• {hit.Summary}, {JujuCalendar.WhenEvent(hit)}\nSheet: {ev.Title}, {JujuCalendar.When(ev)}",
+                    await PromptAsync(chatId, PendingKind.SheetNew, item, extracted, similar.Id,
+                        $"❓ Similar event on calendar:\n• {similar.Summary}, {EventText.When(similar)}\nSheet: {extracted.Title}, {EventText.When(extracted)}",
                         KeyboardKind.Match);
                     continue;
                 }
-                var created = await cal.InsertAsync(cal.Build(ev));
-                await SyncStore.SetAsync(gid, it.Rk, it.Key, it.Hash, created.Id, SyncStatus.Synced, ev.Title);
-                added.Add($"✅ {ev.Title}, {JujuCalendar.When(ev)}");
+                var created = await calendar.InsertAsync(CalendarEventBuilder.Build(extracted));
+                await SyncStore.SetAsync(gid, item.Rk, item.Key, item.Hash, created.Id, SyncStatus.Synced, extracted.Title);
+                addedLines.Add($"✅ {extracted.Title}, {EventText.When(extracted)}");
             }
-            catch (Exception ex) { Fail(ex, $"item '{ev.Title}'", $"❌ {ev.Title}: {TextUtil.Short(ex)}"); }
+            catch (Exception ex) { report.Fail(ex, $"item '{extracted.Title}'", $"❌ {extracted.Title}: {TextUtil.Short(ex)}"); }
         }
+        return addedLines;
+    }
 
-        for (var k = 0; k < changed.Count; k++)
+    async Task AskAboutChangesAsync(
+        long chatId, List<(SheetItem Item, TableEntity Row)> changed, List<ExtractedEvent> changedEvents,
+        Dictionary<string, GEvent> goneEvents, TabReport report)
+    {
+        for (var i = 0; i < changed.Count; i++)
         {
-            var (it, old) = changed[k];
-            var ev = events[fresh.Count + k];
+            var (item, oldRow) = changed[i];
+            var extracted = changedEvents[i];
             try
             {
-                var moved = old.RowKey != it.Rk;
-                var was = old.GetString(Columns.Title) ?? it.Subject;
-                if (moved && goneEvents.TryGetValue(old.RowKey, out var oldEv)) was += ", " + JujuCalendar.WhenEvent(oldEv);
-                await PromptAsync(chatId, PendingKind.SheetChanged, it, ev, old.GetString(Columns.EventId) ?? "",
-                    $"❓ Sheet {(moved ? "date moved" : "changed")}:\n• Was: {was}\nNow: {ev.Title}, {JujuCalendar.When(ev)}\n{TextUtil.Flat(it.Text, ChangedTextPreviewChars)}",
-                    KeyboardKind.Update, moved ? old.RowKey : "");
+                var moved = oldRow.RowKey != item.Rk;
+                var was = oldRow.GetString(Columns.Title) ?? item.Subject;
+                if (moved && goneEvents.TryGetValue(oldRow.RowKey, out var oldEvent)) was += ", " + EventText.When(oldEvent);
+                await PromptAsync(chatId, PendingKind.SheetChanged, item, extracted, oldRow.GetString(Columns.EventId) ?? "",
+                    $"❓ Sheet {(moved ? "date moved" : "changed")}:\n• Was: {was}\nNow: {extracted.Title}, {EventText.When(extracted)}\n{TextUtil.Flat(item.Text, ChangedTextPreviewChars)}",
+                    KeyboardKind.Update, moved ? oldRow.RowKey : "");
             }
-            catch (Exception ex) { Fail(ex, $"change prompt '{ev.Title}'", $"❌ {ev.Title}: {TextUtil.Short(ex)}"); }
+            catch (Exception ex) { report.Fail(ex, $"change prompt '{extracted.Title}'", $"❌ {extracted.Title}: {TextUtil.Short(ex)}"); }
         }
+    }
 
-        foreach (var (row, gEv) in gone)
+    async Task AskAboutRemovalsAsync(long chatId, string gid, List<(TableEntity Row, GEvent Ev)> gone, TabReport report)
+    {
+        foreach (var (row, calendarEvent) in gone)
         {
-            try { await PromptRemovedAsync(chatId, gid, row, gEv); }
-            catch (Exception ex) { Fail(ex, $"removal prompt {row.RowKey}", $"❌ Removal check: {TextUtil.Short(ex)}"); }
+            try { await PromptRemovedAsync(chatId, gid, row, calendarEvent); }
+            catch (Exception ex) { report.Fail(ex, $"removal prompt {row.RowKey}", $"❌ Removal check: {TextUtil.Short(ex)}"); }
         }
-
-        if (added.Count > 0)
-        {
-            lines.Add($"📊 Sheet: {added.Count} added");
-            lines.AddRange(added.Take(AddedPreviewCount));
-            if (added.Count > AddedPreviewCount) lines.Add($"…and {added.Count - AddedPreviewCount} more");
-        }
-
-        if (!failed) await SheetStateStore.SaveCsvHashAsync(gid, csvHash); // otherwise retry next time
     }
 
     async Task<string> DownloadCsvAsync(string sheetId, string gid)
     {
         const char ByteOrderMark = '﻿';
 
-        var csv = await http.CreateClient().GetStringAsync(
+        var csv = await httpFactory.CreateClient().GetStringAsync(
             $"https://docs.google.com/spreadsheets/d/{sheetId}/export?format=csv&gid={gid}");
         if (csv.Length > 0 && csv[0] == ByteOrderMark) csv = csv[1..];
         if (csv.TrimStart().StartsWith('<')) // an HTML sign-in page instead of CSV
@@ -263,13 +288,13 @@ public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpCl
         });
         await SyncStore.AskedAsync(it.Gid, it.Rk, it.Key, it.Hash);
         if (oldRk.Length > 0) await SyncStore.GoneAskedAsync(it.Gid, oldRk); // don't also ask to delete it
-        await tg.SendAsync(chatId, text, TelegramApi.Keyboard(pid, keys));
+        await telegram.SendAsync(chatId, text, TelegramApi.Keyboard(pid, keys));
     }
 
     async Task PromptRemovedAsync(long chatId, string gid, TableEntity row, GEvent gEv)
     {
         var title = gEv.Summary ?? row.GetString(Columns.Title) ?? "Event";
-        var ev = new ExtractedEvent { Title = title, Date = JujuCalendar.StartDay(gEv)?.ToString(Formats.IsoDate, Formats.Inv) };
+        var ev = new ExtractedEvent { Title = title, Date = JujuCalendar.StartDay(gEv) is DateOnly startDay ? DateText.Iso(startDay) : null };
         var pid = await PendingStore.AddAsync(ev, row.GetString(Columns.EventId) ?? "", new Dictionary<string, object>
         {
             [Columns.Kind] = PendingKind.SheetRemoved,
@@ -277,7 +302,7 @@ public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpCl
             [Columns.Rk] = row.RowKey
         });
         await SyncStore.GoneAskedAsync(gid, row.RowKey);
-        await tg.SendAsync(chatId, $"❓ Removed from the sheet:\n• {title}, {JujuCalendar.WhenEvent(gEv)}\nDelete it from the calendar?",
+        await telegram.SendAsync(chatId, $"❓ Removed from the sheet:\n• {title}, {EventText.When(gEv)}\nDelete it from the calendar?",
             TelegramApi.Keyboard(pid, KeyboardKind.Remove));
     }
 
@@ -295,7 +320,7 @@ public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpCl
             if (!SheetItem.TryParseKey(row.GetString(Columns.Key), out _, out var start) || start < today)
                 continue; // the past is left alone
 
-            var ev = await cal.TryGetAsync(eventId);
+            var ev = await calendar.TryGetAsync(eventId);
             if (ev == null) { await SyncStore.MarkAsync(gid, row.RowKey, SyncStatus.Removed); continue; } // already deleted by hand
             result.Add((row, ev));
         }
@@ -319,8 +344,8 @@ public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpCl
     {
         Type = type,
         Title = title,
-        Date = it.Start.ToString(Formats.IsoDate, Formats.Inv),
-        EndDate = it.End > it.Start ? it.End.ToString(Formats.IsoDate, Formats.Inv) : null,
+        Date = DateText.Iso(it.Start),
+        EndDate = it.End > it.Start ? DateText.Iso(it.End) : null,
         Description = $"{it.Text}\n\n{SourceFooter} · {it.Subject} · {it.CellRef}",
         Confidence = Confidence.High
     };
@@ -332,16 +357,14 @@ public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpCl
         for (var i = 0; i < all.Count; i++)
         {
             var it = all[i];
-            var when = it.Start.ToString(Formats.ShortDay, Formats.Inv)
-                       + (it.End > it.Start ? Formats.RangeSeparator + it.End.ToString(Formats.ShortDay, Formats.Inv) : "");
-            sb.AppendLine($"{ItemIdPrefix}{i} | {it.Subject} | {when} | {TextUtil.Flat(it.Text, PromptCellTextChars)}");
+            sb.AppendLine($"{ItemIdPrefix}{i} | {it.Subject} | {DateText.Range(it.Start, it.End)} | {TextUtil.Flat(it.Text, PromptCellTextChars)}");
         }
 
         var result = all.Select(it => (Title: Fallback(it), Type: EventTypes.Event)).ToList();
         var raw = await llm.AskAsync(TitlePrompt.Replace("{TODAY}", LlmUtil.Today()), new LlmPart[] { new TextPart(sb.ToString()) });
         try
         {
-            using var doc = JsonDocument.Parse(LlmUtil.StripFences(raw));
+            using var doc = LlmUtil.ParseJson(raw);
             foreach (var o in doc.RootElement.GetProperty("items").EnumerateArray())
             {
                 var id = o.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
@@ -379,15 +402,15 @@ public class SheetSync(ILlmClient llm, TelegramApi tg, JujuCalendar cal, IHttpCl
             if (near.Count == 0) continue;
 
             cands[i] = near;
-            sb.AppendLine($"NEW {ItemIdPrefix}{i}: {events[i].Type} | {JujuCalendar.When(events[i])} | {events[i].Title}");
-            foreach (var g in near) sb.AppendLine("  " + JujuCalendar.Line(g));
+            sb.AppendLine($"NEW {ItemIdPrefix}{i}: {events[i].Type} | {EventText.When(events[i])} | {events[i].Title}");
+            foreach (var g in near) sb.AppendLine("  " + EventText.Line(g));
         }
         if (cands.Count == 0) return result;
 
         var raw = await llm.AskAsync(MatchPrompt, new LlmPart[] { new TextPart(sb.ToString()) });
         try
         {
-            using var doc = JsonDocument.Parse(LlmUtil.StripFences(raw));
+            using var doc = LlmUtil.ParseJson(raw);
             if (!doc.RootElement.TryGetProperty("matches", out var arr) || arr.ValueKind != JsonValueKind.Array) return result;
 
             foreach (var m in arr.EnumerateArray())

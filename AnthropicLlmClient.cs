@@ -1,43 +1,40 @@
-using System.Text;
 using System.Text.Json;
 
 namespace SchoolAssistant;
 
-public class AnthropicLlmClient(IHttpClientFactory factory) : ILlmClient
+public class AnthropicLlmClient(IHttpClientFactory httpFactory) : HttpLlmClient(httpFactory)
 {
     const string Endpoint = "https://api.anthropic.com/v1/messages";
     const string ApiVersion = "2023-06-01";
     const string DefaultModel = "claude-haiku-4-5-20251001";
-    const int MaxTokens = 4000;
 
-    public async Task<string> AskAsync(string system, IReadOnlyList<LlmPart> parts, CancellationToken ct = default)
+    protected override string ProviderName => "Anthropic";
+
+    protected override HttpRequestMessage BuildRequest(string system, IReadOnlyList<LlmPart> parts)
     {
-        var content = parts.Select<LlmPart, object>(p => p switch
+        var content = parts.Select<LlmPart, object>(part => part switch
         {
-            TextPart t => new { type = "text", text = t.Text },
-            ImagePart i => new { type = "image", source = new { type = "base64", media_type = i.MimeType, data = Convert.ToBase64String(i.Data) } },
-            PdfPart d => new { type = "document", source = new { type = "base64", media_type = "application/pdf", data = Convert.ToBase64String(d.Data) } },
-            _ => throw new NotSupportedException(p.GetType().Name)
+            TextPart text => new { type = "text", text = text.Text },
+            ImagePart image => new { type = "image", source = Base64Source(image.MimeType, image.Data) },
+            PdfPart pdf => new { type = "document", source = Base64Source(MimeTypes.Pdf, pdf.Data) },
+            _ => throw new NotSupportedException(part.GetType().Name)
         }).ToArray();
 
-        var body = JsonSerializer.Serialize(new
+        var request = JsonPost(Endpoint, new
         {
             model = Env.GetOr(Settings.AnthropicModel, DefaultModel),
-            max_tokens = MaxTokens,
+            max_tokens = MaxOutputTokens,
             system,
             messages = new[] { new { role = "user", content } }
         });
-
-        var req = new HttpRequestMessage(HttpMethod.Post, Endpoint)
-        { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-        req.Headers.Add("x-api-key", Env.Get(Settings.AnthropicApiKey));
-        req.Headers.Add("anthropic-version", ApiVersion);
-
-        var res = await factory.CreateClient().SendAsync(req, ct);
-        var json = await res.Content.ReadAsStringAsync(ct);
-        if (!res.IsSuccessStatusCode) throw new HttpRequestException($"Anthropic {(int)res.StatusCode}: {json}");
-
-        using var doc = JsonDocument.Parse(json);
-        return doc.RootElement.GetProperty("content")[0].GetProperty("text").GetString() ?? "";
+        request.Headers.Add("x-api-key", Env.Get(Settings.AnthropicApiKey));
+        request.Headers.Add("anthropic-version", ApiVersion);
+        return request;
     }
+
+    protected override string ReadReply(JsonElement response) =>
+        response.GetProperty("content")[0].GetProperty("text").GetString() ?? "";
+
+    static object Base64Source(string mimeType, byte[] data) =>
+        new { type = "base64", media_type = mimeType, data = Base64(data) };
 }

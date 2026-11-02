@@ -4,6 +4,8 @@ Turns school announcements (shared from Viber to a private Telegram bot) and a s
 
 Built with Azure Functions (.NET 10, isolated worker), Azure Table Storage, Telegram Bot API, an LLM (OpenAI or Anthropic, swappable) and the Google Calendar API.
 
+> New to the code? Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the flow in plain words, every file explained, and how to maintain the app.
+
 ## How it works
 
 ```
@@ -144,6 +146,16 @@ Check it with `getWebhookInfo` (look at `last_error_message`). The host name is 
 - Send `/sync` to sync the Google Sheet immediately. It also runs hourly and skips work if the sheet hasn't changed.
 - Capturing from Viber: use the share sheet manually, or an Android automation app such as Tasker to remind you when a Viber notification arrives.
 
+## Tests
+
+```bash
+dotnet test SchoolAssistant.Tests
+# with coverage (cobertura XML under ./TestResults)
+dotnet test SchoolAssistant.Tests --settings SchoolAssistant.Tests/coverage.runsettings --collect:"XPlat Code Coverage"
+```
+
+The tests use in-memory fakes for Table Storage, the Google Calendar API, Telegram and the LLM, so they need no network or Azure resources. CI runs them before publishing. `Program.cs` (dependency registration) and the Azure `TableClient` factory in `Support.cs` are the only code not covered.
+
 ## Cost
 
 Azure Functions Flex Consumption and Table Storage cost pennies at this volume. The main cost is LLM calls, which stay small with a compact model and one call per message (sheet sync adds one or two calls per changed run).
@@ -165,12 +177,15 @@ Azure Functions Flex Consumption and Table Storage cost pennies at this volume. 
 
 | File | Role |
 |---|---|
-| `Functions.cs` | Telegram webhook, extraction, confirmation flow |
+| `Functions.cs` | Telegram webhook: auth, chat filter, routing, attachment download |
+| `AnnouncementProcessor.cs` | Announcement -> LLM extraction -> calendar or a question |
+| `ButtonHandler.cs` | Carries out a proposal when its button is tapped |
 | `SheetSync.cs`, `SheetParser.cs` | Hourly and manual sheet sync, grid parsing |
-| `JujuCalendar.cs` | Google Calendar client and event building |
-| `ILlmClient.cs`, `OpenAiLlmClient.cs`, `AnthropicLlmClient.cs` | LLM adapter |
-| `Telegram.cs` | Telegram API wrapper |
-| `Models.cs`, `Support.cs` | Event model, event types, settings/text helpers |
-| `Constants.cs` | Setting, table, column and status names; date formats; Manila time |
-| `Stores.cs` | Table Storage access for pending proposals, sync state and sheet hashes |
+| `JujuCalendar.cs` | Google Calendar API client |
+| `CalendarEventBuilder.cs`, `EventText.cs` | Build calendar events; short event text for chat and prompts |
+| `ILlmClient.cs`, `OpenAiLlmClient.cs`, `AnthropicLlmClient.cs` | LLM adapter and shared HTTP handling |
+| `Telegram.cs` | Telegram API wrapper and inline buttons |
+| `Models.cs`, `Support.cs` | Event model, event types, settings/date/text helpers |
+| `Constants.cs` | Setting, table, column and status names; formats; Manila time |
+| `Stores.cs` | Table Storage access: seen messages, pending proposals, sync state |
 | `Program.cs` | Dependency registration |
