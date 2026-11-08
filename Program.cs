@@ -11,6 +11,7 @@ var builder = FunctionsApplication.CreateBuilder(args);
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<TelegramApi>();
 builder.Services.AddSingleton<JujuCalendar>();
+builder.Services.AddSingleton<ISheetTabLister, GoogleSheetTabLister>();
 builder.Services.AddSingleton<SheetSync>();
 builder.Services.AddSingleton<AnnouncementProcessor>();
 builder.Services.AddSingleton<ButtonHandler>();

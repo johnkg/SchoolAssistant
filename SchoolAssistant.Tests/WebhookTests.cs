@@ -39,7 +39,7 @@ public class TelegramWebhookTests : Harness
     {
         var announcements = new AnnouncementProcessor(Llm, Telegram, Calendar, NullLogger<AnnouncementProcessor>.Instance);
         var buttons = new ButtonHandler(Telegram, Calendar, NullLogger<ButtonHandler>.Instance);
-        _sync = new SheetSync(Llm, Telegram, Calendar, new StubHttpFactory(new StubHandler(_ => new HttpResponseMessage())), NullLogger<SheetSync>.Instance);
+        _sync = new SheetSync(Llm, Telegram, Calendar, new FakeSheetTabLister(), new StubHttpFactory(new StubHandler(_ => new HttpResponseMessage())), NullLogger<SheetSync>.Instance);
         _webhook = new TelegramWebhook(Telegram, announcements, buttons, _sync, NullLogger<TelegramWebhook>.Instance);
         LlmAnswer = (system, _) => system.Contains("You extract")
             ? EventsJson(EventJson("Science Quiz", FutureDate(5)))
@@ -125,7 +125,7 @@ public class TelegramWebhookTests : Harness
     {
         await Post(TextUpdate(command));
         Assert.Empty(Llm.Calls);
-        Assert.Equal("⚠️ Set SHEET_ID and SHEET_GIDS first.", Assert.Single(Sent));
+        Assert.Equal("⚠️ Set SHEET_ID first.", Assert.Single(Sent));
     }
 
     // ---------- attachments ----------

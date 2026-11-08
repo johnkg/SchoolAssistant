@@ -11,6 +11,7 @@
   <ItemGroup>
     <!-- Core (.NET 10 needs Worker 2.50.0 or later) -->
     <PackageReference Include="Google.Apis.Calendar.v3" Version="1.75.0.4206" />
+    <PackageReference Include="Google.Apis.Sheets.v4" Version="1.75.0.4178" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker" Version="2.52.0" />
 
     <!-- Triggers: plain HTTP model (the code uses HttpRequestData) + timer -->

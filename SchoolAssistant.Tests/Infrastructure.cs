@@ -197,7 +197,7 @@ public sealed class FakeCalendarServer
         Handler = new StubHandler(Respond);
         Service = new GCal.CalendarService(new BaseClientService.Initializer
         {
-            HttpClientFactory = new GoogleFactory(Handler),
+            HttpClientFactory = new FakeGoogleHttpFactory(Handler),
             ApplicationName = "tests",
             GZipEnabled = false
         });
@@ -250,11 +250,27 @@ public sealed class FakeCalendarServer
 
     static HttpResponseMessage Error(HttpStatusCode status) =>
         StubHandler.Json($"{{\"error\":{{\"code\":{(int)status},\"message\":\"{status}\"}}}}", status);
+}
 
-    sealed class GoogleFactory(HttpMessageHandler inner) : Google.Apis.Http.IHttpClientFactory
+/// <summary>Lets a real Google API service talk to a fake handler instead of the network.</summary>
+public sealed class FakeGoogleHttpFactory(HttpMessageHandler inner) : Google.Apis.Http.IHttpClientFactory
+{
+    public ConfigurableHttpClient CreateHttpClient(CreateHttpClientArgs args) =>
+        new(new ConfigurableMessageHandler(inner));
+}
+
+/// <summary>Tab list for the sheet sync tests: a fixed list, or a failure.</summary>
+public sealed class FakeSheetTabLister : ISheetTabLister
+{
+    public List<string> Gids { get; set; } = new();
+    public Exception? Failure { get; set; }
+    public List<string> AskedFor { get; } = new();
+
+    public Task<IReadOnlyList<string>> ListGidsAsync(string sheetId)
     {
-        public ConfigurableHttpClient CreateHttpClient(CreateHttpClientArgs args) =>
-            new(new ConfigurableMessageHandler(inner));
+        AskedFor.Add(sheetId);
+        if (Failure != null) throw Failure;
+        return Task.FromResult<IReadOnlyList<string>>(Gids.ToList());
     }
 }
 

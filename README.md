@@ -59,7 +59,10 @@ Google Sheet ──hourly timer / "/sync"──▶ parse grid ──▶ LLM name
 
 ### 3. Google Sheet (optional)
 
-The sheet must be viewable by anyone with the link. Set `SHEET_ID` (the part of the URL between `/d/` and `/edit`) and `SHEET_GIDS` (comma-separated `gid=` values of the tabs to sync).
+1. Set `SHEET_ID` (the part of the URL between `/d/` and `/edit`).
+2. The sheet must be viewable by anyone with the link (the app downloads each tab as CSV).
+3. To pick up new tabs (a new month) automatically, also enable the **Google Sheets API** in the same Google Cloud project and share the sheet with the service account's email as **Viewer**. The app then syncs every visible tab.
+4. Or skip step 3 and set `SHEET_GIDS` (comma-separated `gid=` values) to sync only those tabs. When `SHEET_GIDS` is set it wins and no tab lookup happens.
 
 ### 4. Azure resources
 
@@ -89,7 +92,8 @@ Copy `local.settings.example.json` to `local.settings.json` for local runs. For 
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Anthropic credentials and model (default `claude-haiku-4-5-20251001`) |
 | `GOOGLE_SA_JSON` | Service account key (base64 or raw JSON) |
 | `JUJU_CALENDAR_ID` | Target calendar ID |
-| `SHEET_ID`, `SHEET_GIDS` | Tracker sheet and tab gids |
+| `SHEET_ID` | Tracker sheet |
+| `SHEET_GIDS` | Optional. Tab gids to sync; leave empty to sync every visible tab |
 | `CONFIRM_LOW_CONFIDENCE` | Ask before adding low-confidence events |
 | `DEBUG_REPLIES` | Reply with hints when messages come from other chats |
 | `TABLES_CONNECTION_STRING` | Storage connection string (falls back to `AzureWebJobsStorage`) |
@@ -171,7 +175,10 @@ Azure Functions Flex Consumption and Table Storage cost pennies at this volume. 
 - **No reply:** run `getWebhookInfo`; set `DEBUG_REPLIES=true`; check the Function App log stream.
 - **Replied but nothing on the calendar:** check `JUJU_CALENDAR_ID`, that the calendar is shared with the service account with edit rights, and that the calendar is visible in your list.
 - **`'T' is invalid after a single JSON value`:** the model added text after its JSON. Make sure you've deployed the version of `Support.cs` whose `StripFences` returns only the first balanced JSON value.
-- **`/sync` finds nothing:** confirm the sheet is link-viewable and `SHEET_GIDS` has the right tab gids.
+- **`/sync` finds nothing:** confirm the sheet is link-viewable. Tabs with no upcoming dates are skipped silently, so an old month shows "Sheet is up to date".
+- **`/sync` says "Google rejected sheet … tab … (400)":** `SHEET_ID` or a gid in `SHEET_GIDS` is wrong. The message names both.
+- **`/sync` says "Google denied access … (403)":** share the sheet so anyone with the link can view it.
+- **`/sync` says "Can't list the tabs … (403)":** enable the Google Sheets API and share the sheet with the service account, or set `SHEET_GIDS`.
 
 ## Project layout
 
@@ -182,6 +189,7 @@ Azure Functions Flex Consumption and Table Storage cost pennies at this volume. 
 | `ButtonHandler.cs` | Carries out a proposal when its button is tapped |
 | `SheetSync.cs`, `SheetParser.cs` | Hourly and manual sheet sync, grid parsing |
 | `JujuCalendar.cs` | Google Calendar API client |
+| `SheetTabs.cs`, `GoogleCredentials.cs` | Finds the sheet's tabs through the Sheets API; shared service-account sign-in |
 | `CalendarEventBuilder.cs`, `EventText.cs` | Build calendar events; short event text for chat and prompts |
 | `ILlmClient.cs`, `OpenAiLlmClient.cs`, `AnthropicLlmClient.cs` | LLM adapter and shared HTTP handling |
 | `Telegram.cs` | Telegram API wrapper and inline buttons |

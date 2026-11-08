@@ -1,6 +1,4 @@
 using System.Net;
-using System.Text;
-using Google.Apis.Auth.OAuth2;
 using Google.Apis.Services;
 using GCal = Google.Apis.Calendar.v3;
 using GEvent = Google.Apis.Calendar.v3.Data.Event;
@@ -29,15 +27,9 @@ public class JujuCalendar
 
     internal static GCal.CalendarService CreateService()
     {
-        // GOOGLE_SA_JSON is the service account key file: raw JSON, or the same thing base64-encoded.
-        var raw = Env.Get(Settings.GoogleServiceAccountJson).Trim();
-        var json = raw.StartsWith('{') ? raw : Encoding.UTF8.GetString(Convert.FromBase64String(raw));
-#pragma warning disable CS0618
-        var credential = GoogleCredential.FromJson(json).CreateScoped(CalendarScope);
-#pragma warning restore CS0618
         return new GCal.CalendarService(new BaseClientService.Initializer
         {
-            HttpClientInitializer = credential,
+            HttpClientInitializer = GoogleCredentials.ForServiceAccount(CalendarScope),
             ApplicationName = GoogleAppName
         });
     }
