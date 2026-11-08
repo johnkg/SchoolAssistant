@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging;
 
 namespace SchoolAssistant;
 
@@ -13,7 +14,7 @@ public enum KeyboardKind
     Remove  // the item left the sheet: delete or keep
 }
 
-public class TelegramApi(IHttpClientFactory httpFactory)
+public class TelegramApi(IHttpClientFactory httpFactory, ILogger<TelegramApi>? log = null)
 {
     const string ApiBase = "https://api.telegram.org";
     const int MaxMessageChars = 4000; // Telegram rejects messages over 4096 characters
@@ -29,8 +30,16 @@ public class TelegramApi(IHttpClientFactory httpFactory)
     public Task EditAsync(long chatId, long messageId, string text) =>
         CallAsync("editMessageText", new { chat_id = chatId, message_id = messageId, text = Shorten(text) });
 
-    public Task AnswerCallbackAsync(string callbackId, string? text = null) =>
-        CallAsync("answerCallbackQuery", new { callback_query_id = callbackId, text });
+    /// <summary>
+    /// Stops the button spinner (and optionally shows a short notice). This is cosmetic, and Telegram refuses it
+    /// once the tap is a few seconds old (for example after a cold start), so a failure here is logged and never
+    /// allowed to stop the real work.
+    /// </summary>
+    public async Task AnswerCallbackAsync(string callbackId, string? text = null)
+    {
+        try { await CallAsync("answerCallbackQuery", new { callback_query_id = callbackId, text }); }
+        catch (HttpRequestException ex) { log?.LogWarning(ex, "Could not answer button tap {CallbackId}", callbackId); }
+    }
 
     public async Task<byte[]> DownloadAsync(string fileId)
     {

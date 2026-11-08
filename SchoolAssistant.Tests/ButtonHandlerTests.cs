@@ -133,6 +133,22 @@ public class ButtonHandlerTests : Harness
         Assert.Single(Server.Events);
     }
 
+    // ---------- late answers ----------
+    [Fact]
+    public async Task The_action_still_runs_when_telegram_refuses_the_late_button_answer()
+    {
+        TelegramOverride = r => r.Uri.AbsolutePath.EndsWith("answerCallbackQuery")
+            ? StubHandler.Json("""{"ok":false,"description":"Bad Request: query is too old"}""", System.Net.HttpStatusCode.BadRequest)
+            : null;
+        var id = await Propose();
+
+        await TapAsync("n", id);
+
+        Assert.Single(Server.Events);
+        Assert.StartsWith("✅ Added: Science Quiz", Assert.Single(Edited));
+        Assert.Empty(Sent); // no error message to the chat
+    }
+
     // ---------- failures ----------
     [Fact]
     public async Task A_failed_action_gives_the_buttons_back_and_reports_the_error()

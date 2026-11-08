@@ -75,7 +75,7 @@ AnnouncementProcessor
 Button tap → TelegramWebhook → ButtonHandler
   1. Is it your chat and valid data?   (else just acknowledge)
   2. "Claim" the pending question       (a double tap can't run twice)
-  3. Do what the button says:
+  3. Answer the tap (best-effort; a late answer is ignored), then do what the button says:
        Add / Update / Skip / Delete / Keep
   4. If it came from the spreadsheet, remember the result in the Synced table
   5. Replace the question with the result ("✅ Added: Science Quiz, Fri Oct 9")
@@ -286,5 +286,5 @@ Only two things are excluded from coverage: `Program.cs` (needs a live host) and
 ## 8. Known quirks
 
 - A manual `/sync` that only sends questions (nothing added) also replies "📊 Sheet is up to date.". This is harmless but can read oddly. A test pins the behaviour for timer runs.
-- `Db.Table` asks Azure to create the table on every call. It works but costs an extra round trip each time; caching table clients would be a cheap future improvement.
+- Answering a button tap (the spinner) is best-effort. Telegram refuses it if the tap is more than a few seconds old, for example after a cold start. That is logged, and the tap's real action still runs.
 - If Telegram itself is down, a manual `/sync` that has something to report will fail when sending the summary.

@@ -27,9 +27,15 @@ internal static class Db
 
     public static TableClient Table(string name) => TableFactory(name);
 
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, TableClient> CreatedTables = new();
+
     // Talks to Azure Storage, so it can't run in unit tests; tests swap TableFactory instead.
+    // Each table is created once per app instance, not on every read and write.
     [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
-    static TableClient CreateTable(string name)
+    static TableClient CreateTable(string name) => CreatedTables.GetOrAdd(name, CreateTableClient);
+
+    [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
+    static TableClient CreateTableClient(string name)
     {
         // Flex Consumption uses identity-based storage (no AzureWebJobsStorage connection string),
         // so tables use their own connection string setting when present.

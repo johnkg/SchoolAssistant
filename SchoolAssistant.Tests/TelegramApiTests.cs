@@ -61,6 +61,24 @@ public class TelegramApiTests : AppTestBase
     }
 
     [Fact]
+    public async Task A_late_button_answer_is_logged_and_ignored_instead_of_failing()
+    {
+        var tooOld = """{"ok":false,"error_code":400,"description":"Bad Request: query is too old"}""";
+        var telegram = new TelegramApi(
+            new StubHttpFactory(new StubHandler(_ => StubHandler.Json(tooOld, HttpStatusCode.BadRequest))),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<TelegramApi>.Instance);
+
+        await telegram.AnswerCallbackAsync("cb1", "Expired"); // must not throw
+    }
+
+    [Fact]
+    public async Task A_late_button_answer_is_ignored_even_without_a_logger()
+    {
+        var telegram = new TelegramApi(new StubHttpFactory(new StubHandler(_ => StubHandler.Json("{}", HttpStatusCode.BadRequest))));
+        await telegram.AnswerCallbackAsync("cb1");
+    }
+
+    [Fact]
     public async Task A_failed_call_throws_with_the_telegram_answer()
     {
         var failing = new TelegramApi(new StubHttpFactory(new StubHandler(_ => StubHandler.Json("""{"description":"bad"}""", HttpStatusCode.BadRequest))));
