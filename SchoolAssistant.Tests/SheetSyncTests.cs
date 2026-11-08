@@ -15,6 +15,7 @@ public class SheetSyncTests : Harness
     const string Gid = "55";
     readonly SheetSync _sync;
     readonly StubHandler _sheetHandler;
+    readonly FakeSheetTabLister _tabs = new();
     string _csv = "";
     string _matchAnswer = """{"matches":[]}""";
     string? _nameAnswerOverride;
@@ -24,7 +25,7 @@ public class SheetSyncTests : Harness
         SetEnv(Settings.SheetId, "sheet-1");
         SetEnv(Settings.SheetGids, Gid);
         _sheetHandler = new StubHandler(_ => new HttpResponseMessage { Content = new StringContent(_csv) });
-        _sync = new SheetSync(Llm, Telegram, Calendar, new StubHttpFactory(_sheetHandler), NullLogger<SheetSync>.Instance);
+        _sync = new SheetSync(Llm, Telegram, Calendar, _tabs, new StubHttpFactory(_sheetHandler), NullLogger<SheetSync>.Instance);
 
         LlmAnswer = (system, text) =>
         {
@@ -58,13 +59,13 @@ public class SheetSyncTests : Harness
 
     // ---------- settings and locking ----------
     [Fact]
-    public async Task Without_sheet_settings_a_manual_sync_explains_and_a_timed_one_stays_quiet()
+    public async Task Without_a_sheet_id_a_manual_sync_explains_and_a_timed_one_stays_quiet()
     {
         SetEnv(Settings.SheetId, null);
         await Run(manual: false);
         Assert.Empty(Sent);
         await Run(manual: true);
-        Assert.Equal("⚠️ Set SHEET_ID and SHEET_GIDS first.", Assert.Single(Sent));
+        Assert.Equal("⚠️ Set SHEET_ID first.", Assert.Single(Sent));
     }
 
     [Fact]
@@ -151,12 +152,12 @@ public class SheetSyncTests : Harness
     }
 
     [Fact]
-    public async Task A_sheet_with_only_past_items_reports_nothing_upcoming_and_is_remembered()
+    public async Task A_sheet_with_only_past_items_is_silent_and_remembered()
     {
         var past = ManilaTime.Today.AddDays(-40);
         _csv = $"S,{Fmt(past)},{Fmt(past.AddDays(1))},{Fmt(past.AddDays(2))}\nMath,a,b,c\n";
         await Run();
-        Assert.Equal($"⚠️ No upcoming dated items found on tab {Gid}.", Assert.Single(Sent));
+        Assert.Equal("📊 Sheet is up to date.", Assert.Single(Sent)); // old months are not worth a warning
         Assert.NotNull(await SheetStateStore.GetCsvHashAsync(Gid));
 
         ClearSent();
@@ -408,7 +409,7 @@ public class SheetSyncTests : Harness
         var handler = new StubHandler(_ => ++calls == 1
             ? new HttpResponseMessage(System.Net.HttpStatusCode.InternalServerError)
             : new HttpResponseMessage { Content = new StringContent(Csv(("Math", 5, "WW 1"))) });
-        var sync = new SheetSync(Llm, Telegram, Calendar, new StubHttpFactory(handler), NullLogger<SheetSync>.Instance);
+        var sync = new SheetSync(Llm, Telegram, Calendar, _tabs, new StubHttpFactory(handler), NullLogger<SheetSync>.Instance);
 
         await sync.RunAsync(ChatId, manual: true);
         Assert.Single(Server.Events);
@@ -438,6 +439,77 @@ public class SheetSyncTests : Harness
         await Run(manual: false);
         Assert.Equal(hashBefore, await SheetStateStore.GetCsvHashAsync(Gid)); // not advanced, so the next run retries
         Assert.NotEqual(SheetParser.Sha(_csv, SheetItem.ContentHashHexChars), await SheetStateStore.GetCsvHashAsync(Gid));
+    }
+
+    // ---------- which tabs ----------
+    [Fact]
+    public async Task Without_SHEET_GIDS_every_listed_tab_is_synced()
+    {
+        SetEnv(Settings.SheetGids, null);
+        _tabs.Gids = new List<string> { "11", "22" };
+        _csv = Csv(("Math", 5, "WW 1"));
+        await Run();
+
+        Assert.Equal(new[] { "sheet-1" }, _tabs.AskedFor);
+        Assert.Equal(new[] { "gid=11", "gid=22" }, _sheetHandler.Requests.Select(r => r.Uri.Query.Split('&').Last()));
+    }
+
+    [Fact]
+    public async Task SHEET_GIDS_overrides_tab_discovery()
+    {
+        _tabs.Gids = new List<string> { "99" };
+        _csv = Csv();
+        await Run();
+        Assert.Empty(_tabs.AskedFor);
+        Assert.Equal($"gid={Gid}", _sheetHandler.Requests.Single().Uri.Query.Split('&').Last());
+    }
+
+    [Fact]
+    public async Task A_SHEET_GIDS_with_no_usable_ids_falls_back_to_discovery()
+    {
+        SetEnv(Settings.SheetGids, "abc");
+        _tabs.Gids = new List<string> { "7" };
+        _csv = Csv();
+        await Run();
+        Assert.Equal("gid=7", _sheetHandler.Requests.Single().Uri.Query.Split('&').Last());
+    }
+
+    [Fact]
+    public async Task A_sheet_with_no_tabs_is_reported_to_a_manual_sync_only()
+    {
+        SetEnv(Settings.SheetGids, null);
+        await Run(manual: false);
+        Assert.Empty(Sent);
+        await Run(manual: true);
+        Assert.Equal("⚠️ The sheet has no visible tabs.", Assert.Single(Sent));
+    }
+
+    [Fact]
+    public async Task If_the_tabs_cannot_be_listed_a_manual_sync_says_why_and_a_timed_one_stays_quiet()
+    {
+        SetEnv(Settings.SheetGids, null);
+        _tabs.Failure = new InvalidOperationException("Can't list the tabs (403). Share the sheet.");
+        await Run(manual: false);
+        Assert.Empty(Sent);
+        await Run(manual: true);
+        Assert.Equal("❌ Can't list the tabs (403). Share the sheet.", Assert.Single(Sent));
+        Assert.Empty(_sheetHandler.Requests);
+    }
+
+    // ---------- download errors name the sheet, the tab and the likely cause ----------
+    [Theory]
+    [InlineData(400, "Google rejected sheet sheet-1 tab 55 (400). Check SHEET_ID and SHEET_GIDS.")]
+    [InlineData(401, "Google denied access to sheet sheet-1 tab 55 (401). Share the sheet so anyone with the link can view it.")]
+    [InlineData(403, "Google denied access to sheet sheet-1 tab 55 (403). Share the sheet so anyone with the link can view it.")]
+    [InlineData(404, "Sheet sheet-1 tab 55 not found (404). Check SHEET_ID and SHEET_GIDS.")]
+    [InlineData(500, "Google returned 500 for sheet sheet-1 tab 55.")]
+    public async Task A_failed_download_explains_itself(int status, string explanation)
+    {
+        var failing = new StubHandler(_ => new HttpResponseMessage((System.Net.HttpStatusCode)status));
+        var sync = new SheetSync(Llm, Telegram, Calendar, _tabs, new StubHttpFactory(failing), NullLogger<SheetSync>.Instance);
+
+        await sync.RunAsync(ChatId, manual: true);
+        Assert.Equal($"❌ Sheet tab 55: {explanation}", Assert.Single(Sent));
     }
 
     // ---------- timer ----------

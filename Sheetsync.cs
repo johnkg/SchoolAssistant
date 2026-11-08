@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using Azure.Data.Tables;
@@ -16,7 +17,8 @@ public class SheetPollTimer(SheetSync sync)
         sync.RunAsync(Env.TelegramChatId, manual: false);
 }
 
-public class SheetSync(ILlmClient llm, TelegramApi telegram, JujuCalendar calendar, IHttpClientFactory httpFactory, ILogger<SheetSync> log)
+public class SheetSync(
+    ILlmClient llm, TelegramApi telegram, JujuCalendar calendar, ISheetTabLister tabLister, IHttpClientFactory httpFactory, ILogger<SheetSync> log)
 {
     /// <summary>Footer added to each event description; also used to read the cell text back out.</summary>
     public const string SourceFooter = "— School tracker sheet";
@@ -63,13 +65,23 @@ public class SheetSync(ILlmClient llm, TelegramApi telegram, JujuCalendar calend
         try
         {
             var sheetId = Env.GetOr(Settings.SheetId, "");
-            var gids = Env.GetOr(Settings.SheetGids, "")
-                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Where(g => g.All(char.IsDigit))
-                .ToList();
-            if (sheetId.Length == 0 || gids.Count == 0)
+            if (sheetId.Length == 0)
             {
-                if (manual) await telegram.SendAsync(chatId, $"⚠️ Set {Settings.SheetId} and {Settings.SheetGids} first.");
+                if (manual) await telegram.SendAsync(chatId, $"⚠️ Set {Settings.SheetId} first.");
+                return;
+            }
+
+            IReadOnlyList<string> gids;
+            try { gids = await ResolveTabsAsync(sheetId); }
+            catch (Exception ex)
+            {
+                log.LogError(ex, "Could not list the tabs of the sheet");
+                if (manual) await telegram.SendAsync(chatId, $"❌ {TextUtil.Short(ex)}");
+                return;
+            }
+            if (gids.Count == 0)
+            {
+                if (manual) await telegram.SendAsync(chatId, "⚠️ The sheet has no visible tabs.");
                 return;
             }
 
@@ -104,6 +116,16 @@ public class SheetSync(ILlmClient llm, TelegramApi telegram, JujuCalendar calend
         }
     }
 
+    // SHEET_GIDS, when set, picks the tabs by hand. Otherwise every visible tab is synced, so a new month needs no setting change.
+    async Task<IReadOnlyList<string>> ResolveTabsAsync(string sheetId)
+    {
+        var configured = Env.GetOr(Settings.SheetGids, "")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(g => g.All(char.IsDigit))
+            .ToList();
+        return configured.Count > 0 ? configured : await tabLister.ListGidsAsync(sheetId);
+    }
+
     async Task SyncTabAsync(long chatId, string sheetId, string gid, bool manual, List<string> lines)
     {
         var today = ManilaTime.Today;
@@ -116,7 +138,7 @@ public class SheetSync(ILlmClient llm, TelegramApi telegram, JujuCalendar calend
         var items = SheetParser.Parse(gid, SheetParser.ParseCsv(csv), today).Where(i => i.End >= today).ToList();
         if (items.Count == 0)
         {
-            if (manual) lines.Add($"⚠️ No upcoming dated items found on tab {gid}.");
+            log.LogInformation("Tab {Gid} has no upcoming dated items", gid); // old months are normal, so no chat message
             await SheetStateStore.SaveCsvHashAsync(gid, csvHash);
             return;
         }
@@ -230,13 +252,27 @@ public class SheetSync(ILlmClient llm, TelegramApi telegram, JujuCalendar calend
     {
         const char ByteOrderMark = '﻿';
 
-        var csv = await httpFactory.CreateClient().GetStringAsync(
+        var response = await httpFactory.CreateClient().GetAsync(
             $"https://docs.google.com/spreadsheets/d/{sheetId}/export?format=csv&gid={gid}");
+        if (!response.IsSuccessStatusCode) throw new InvalidOperationException(ExplainDownloadFailure(response.StatusCode, sheetId, gid));
+        var csv = await response.Content.ReadAsStringAsync();
         if (csv.Length > 0 && csv[0] == ByteOrderMark) csv = csv[1..];
         if (csv.TrimStart().StartsWith('<')) // an HTML sign-in page instead of CSV
             throw new InvalidOperationException("The sheet asked for a sign-in. It must be viewable by anyone with the link.");
         return csv;
     }
+
+    // What the person can do about each kind of failure, with the sheet and tab named.
+    static string ExplainDownloadFailure(HttpStatusCode status, string sheetId, string gid) => status switch
+    {
+        HttpStatusCode.BadRequest =>
+            $"Google rejected sheet {sheetId} tab {gid} (400). Check {Settings.SheetId} and {Settings.SheetGids}.",
+        HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden =>
+            $"Google denied access to sheet {sheetId} tab {gid} ({(int)status}). Share the sheet so anyone with the link can view it.",
+        HttpStatusCode.NotFound =>
+            $"Sheet {sheetId} tab {gid} not found (404). Check {Settings.SheetId} and {Settings.SheetGids}.",
+        _ => $"Google returned {(int)status} for sheet {sheetId} tab {gid}."
+    };
 
     // New items, and items whose text or end date changed since we synced them.
     static (List<SheetItem> Fresh, List<(SheetItem Item, TableEntity Row)> Changed) Classify(

@@ -86,7 +86,8 @@ If the action fails, the question is un-claimed so the buttons work again.
 
 ```
 SheetPollTimer / "/sync" → SheetSync
-  for each tab (gid) in SHEET_GIDS:
+  tabs = SHEET_GIDS if set, otherwise every visible tab (asked from the Sheets API)
+  for each tab (gid):
     download CSV  →  same as last time? stop (timer only; /sync always rechecks)
     SheetParser: find the date header row, read each subject row
                  (identical neighbouring cells become one date range)
@@ -128,6 +129,8 @@ All C# files are in the repository root. Class names are `JujuCalendar`, `SheetS
 
 | File | What it is | Why it exists |
 |---|---|---|
+| `SheetTabs.cs` | `ISheetTabLister` and `GoogleSheetTabLister`: asks the Google Sheets API which tabs the spreadsheet has (skipping hidden ones), so a new month needs no setting change. Turns the usual failures (403, 404, 400) into plain-language messages. | The app used to need `SHEET_GIDS` updated every month. |
+| `GoogleCredentials.cs` | Builds the service-account sign-in from `GOOGLE_SA_JSON` for a given scope. | Calendar and Sheets use the same account, so the parsing lives in one place. |
 | `Jujucalendar.cs` | `JujuCalendar`: the Google Calendar client (list, get, insert, update, delete). Also small pure helpers: `StartDay`, `EndDay`, `SheetText`, `IsGone`. | The only file that talks to Google. Swap or fake it without touching the rest. |
 | `Telegram.cs` | `TelegramApi`: send, edit, answer button taps, download files. Builds the inline button keyboards and reads the button data back. | The only file that talks to Telegram. |
 | `ILlmClient.cs` | The `ILlmClient` interface, the input parts (`TextPart`, `ImagePart`, `PdfPart`), and `HttpLlmClient`, the shared base for providers (POST JSON, check errors, parse reply). | Defines the one LLM surface the app uses. |
@@ -161,6 +164,7 @@ All C# files are in the repository root. Class names are `JujuCalendar`, `SheetS
 | `Infrastructure.cs` | The fakes: in-memory tables, stubbed HTTP, scripted LLM, fake Google Calendar server, and `Harness`, the shared setup. |
 | `HelperTests.cs` | `TextUtil`, `DateText`, `LlmUtil`, `Env`, `ManilaTime`, `Db`. |
 | `ModelTests.cs` | `ExtractedEvent` and `Extraction.Parse`. |
+| `SheetTabListerTests.cs` | Tab discovery and its error messages. |
 | `SheetParserTests.cs` | CSV, grid reading, year guessing, `SheetItem` keys and hashes. |
 | `CalendarTextTests.cs` | `EventText`, `CalendarEventBuilder`, `JujuCalendar` static helpers. |
 | `TelegramApiTests.cs` | Telegram calls, keyboards, callback data. |
@@ -196,7 +200,7 @@ How a sheet item is recognised:
 
 ## 5. Settings
 
-See the table in the README for the full list. In short: Telegram (`TELEGRAM_TOKEN`, `TELEGRAM_SECRET`, `TELEGRAM_CHAT_ID`), LLM (`LLM_PROVIDER` plus that provider's key and model), Google (`GOOGLE_SA_JSON`, `JUJU_CALENDAR_ID`), sheet (`SHEET_ID`, `SHEET_GIDS`), behaviour (`CONFIRM_LOW_CONFIDENCE` defaults to true, `DEBUG_REPLIES` defaults to false), and storage (`TABLES_CONNECTION_STRING`, falling back to `AzureWebJobsStorage`).
+See the table in the README for the full list. In short: Telegram (`TELEGRAM_TOKEN`, `TELEGRAM_SECRET`, `TELEGRAM_CHAT_ID`), LLM (`LLM_PROVIDER` plus that provider's key and model), Google (`GOOGLE_SA_JSON`, `JUJU_CALENDAR_ID`), sheet (`SHEET_ID`; `SHEET_GIDS` is an optional override of which tabs to sync), behaviour (`CONFIRM_LOW_CONFIDENCE` defaults to true, `DEBUG_REPLIES` defaults to false), and storage (`TABLES_CONNECTION_STRING`, falling back to `AzureWebJobsStorage`).
 
 Rule: read settings through `Env` using the names in `Constants.cs` (`Settings`).
 
@@ -248,7 +252,9 @@ Before every commit: build and test must pass. CI runs the same tests before pub
 | Bot does not reply | `getWebhookInfo` on Telegram; secret matches; chat id matches; set `DEBUG_REPLIES=true` for a hint. |
 | Replies but nothing on the calendar | `JUJU_CALENDAR_ID`; calendar shared with the service account with edit rights. |
 | "Couldn't read the AI result" | The raw model answer is saved in the `Messages` table (`ResultJson`) for that update id. |
-| `/sync` finds nothing | Sheet must be viewable by anyone with the link; `SHEET_GIDS` must be tab ids. |
+| `/sync` finds nothing | Sheet must be viewable by anyone with the link. Tabs with no upcoming dates are skipped silently. |
+| `/sync` says "Google rejected sheet … tab … (400)" | `SHEET_ID` or a gid in `SHEET_GIDS` is wrong; the message names both. |
+| `/sync` says "Can't list the tabs … (403)" | Enable the Google Sheets API and share the sheet with the service account as Viewer, or set `SHEET_GIDS`. |
 | Sheet keeps asking the same question | Look at the `Synced` row for that item (`Hash`, `AskedHash`, `Status`). |
 | A button says "Already handled" or "Expired" | The question was already answered, or the `Pending` row is gone. |
 
