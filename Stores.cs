@@ -19,6 +19,10 @@ internal static class MessageStore
         catch (RequestFailedException e) when (e.Status == (int)HttpStatusCode.Conflict) { return false; }
     }
 
+    /// <summary>Deletes updates last written before <paramref name="cutoff"/>. Returns how many.</summary>
+    public static Task<int> DeleteOlderThanAsync(DateTimeOffset cutoff) =>
+        TableCleanup.DeleteWhereAsync(Db.Table(Tables.Messages), Array.Empty<string>(), row => row.Timestamp < cutoff);
+
     public static Task SaveResultAsync(string updateId, string resultJson) =>
         Db.Table(Tables.Messages).UpdateEntityAsync(
             new TableEntity(Tables.MessagesPartition, updateId) { [Columns.ResultJson] = resultJson }, ETag.All, TableUpdateMode.Merge);
@@ -80,6 +84,14 @@ internal static class PendingStore
             Text(row, Columns.Gid), Text(row, Columns.Rk), Text(row, Columns.Key), Text(row, Columns.Hash), Text(row, Columns.OldRk)));
     }
 
+    /// <summary>
+    /// Deletes answered questions last written before <paramref name="cutoff"/>. Unanswered ones stay however old,
+    /// because deleting one would leave its sheet item marked as asked-about with no way to answer.
+    /// </summary>
+    public static Task<int> DeleteAnsweredOlderThanAsync(DateTimeOffset cutoff) =>
+        TableCleanup.DeleteWhereAsync(Db.Table(Tables.Pending), new[] { Columns.Status },
+            row => row.GetString(Columns.Status) == PendingStatus.Done && row.Timestamp < cutoff);
+
     /// <summary>Lets the buttons work again after the action failed.</summary>
     public static Task ReleaseAsync(string id) =>
         Db.Table(Tables.Pending).UpdateEntityAsync(
@@ -126,6 +138,14 @@ internal static class SyncStore
             [Columns.AskedHash] = askedHash
         }, TableUpdateMode.Merge);
 
+    /// <summary>
+    /// Deletes records of sheet items whose first day is before <paramref name="firstDayToKeep"/>. The past is never
+    /// back-filled, so these are not needed again. Rows with no readable key are kept.
+    /// </summary>
+    public static Task<int> DeleteStartingBeforeAsync(DateOnly firstDayToKeep) =>
+        TableCleanup.DeleteWhereAsync(Db.Table(Tables.Synced), new[] { Columns.Key },
+            row => SheetItem.TryParseKey(row.GetString(Columns.Key), out _, out var start) && start < firstDayToKeep);
+
     public static async Task<Dictionary<string, TableEntity>> LoadTabAsync(string gid)
     {
         var rows = new Dictionary<string, TableEntity>();
@@ -152,4 +172,24 @@ internal static class SheetStateStore
 
     public static Task SaveCsvHashAsync(string gid, string hash) =>
         Db.Table(Tables.State).UpsertEntityAsync(new TableEntity(Tables.StatePartition, RowKeyPrefix + gid) { [Columns.Hash] = hash });
+}
+
+/// <summary>Shared by the cleanup of old rows.</summary>
+internal static class TableCleanup
+{
+    /// <summary>
+    /// Deletes every row the test picks. Only the key columns, the timestamp and <paramref name="columns"/> are read.
+    /// The picking is done here rather than in a query so the rules stay readable.
+    /// </summary>
+    public static async Task<int> DeleteWhereAsync(TableClient table, string[] columns, Func<TableEntity, bool> shouldDelete)
+    {
+        var select = columns.Concat(new[] { "PartitionKey", "RowKey", "Timestamp" }).ToList();
+        var doomed = new List<(string PartitionKey, string RowKey)>();
+        await foreach (var row in table.QueryAsync<TableEntity>(select: select))
+            if (shouldDelete(row)) doomed.Add((row.PartitionKey, row.RowKey));
+
+        foreach (var (partitionKey, rowKey) in doomed)
+            await table.DeleteEntityAsync(partitionKey, rowKey);
+        return doomed.Count;
+    }
 }

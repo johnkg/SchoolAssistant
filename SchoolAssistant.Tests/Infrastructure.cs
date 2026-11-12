@@ -53,6 +53,15 @@ public sealed class FakeTable : TableClient
         return Task.FromResult<Response>(null!);
     }
 
+    public override Task<Response> DeleteEntityAsync(string partitionKey, string rowKey, ETag ifMatch = default, CancellationToken cancellationToken = default)
+    {
+        _rows.Remove((partitionKey, rowKey));
+        return Task.FromResult<Response>(null!);
+    }
+
+    /// <summary>Pretend the row was last written at this time (tables stamp rows themselves).</summary>
+    public void SetTimestamp(string pk, string rk, DateTimeOffset timestamp) => _rows[(pk, rk)].Timestamp = timestamp;
+
     public override Task<Response> UpsertEntityAsync<T>(T entity, TableUpdateMode mode = TableUpdateMode.Merge, CancellationToken cancellationToken = default)
     {
         Store(entity, replace: mode == TableUpdateMode.Replace || !_rows.ContainsKey((entity.PartitionKey, entity.RowKey)));
@@ -77,13 +86,14 @@ public sealed class FakeTable : TableClient
         foreach (var (name, value) in (TableEntity)entity)
             if (name is not ("PartitionKey" or "RowKey" or "odata.etag" or "Timestamp")) merged[name] = value;
         merged.ETag = new ETag($"\"{++_etagCounter}\"");
+        merged.Timestamp = DateTimeOffset.UtcNow;
         _rows[key] = merged;
         if (entity is TableEntity live) live.ETag = merged.ETag;
     }
 
     static TableEntity Copy(TableEntity source)
     {
-        var copy = new TableEntity(source.PartitionKey, source.RowKey) { ETag = source.ETag };
+        var copy = new TableEntity(source.PartitionKey, source.RowKey) { ETag = source.ETag, Timestamp = source.Timestamp };
         foreach (var (name, value) in source)
             if (name is not ("PartitionKey" or "RowKey" or "odata.etag" or "Timestamp")) copy[name] = value;
         return copy;

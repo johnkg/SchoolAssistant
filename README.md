@@ -147,8 +147,20 @@ Check it with `getWebhookInfo` (look at `last_error_message`). The host name is 
 ## Usage
 
 - Share a Viber message, image or PDF to the bot's Telegram chat. The bot replies with a short confirmation or asks via buttons when a similar event exists.
+- Send `/cleanup` to delete stored records from before the current month (see "Storage cleanup" below).
 - Send `/sync` to sync the Google Sheet immediately. It also runs hourly and skips work if the sheet hasn't changed.
 - Capturing from Viber: use the share sheet manually, or an Android automation app such as Tasker to remind you when a Viber notification arrives.
+
+## Storage cleanup
+
+Table Storage grows slowly, so cleanup runs once a month (03:00 UTC on the 1st) and on demand with `/cleanup`. It removes everything from before the first day of the current month (Manila time):
+
+- `Messages`: old Telegram updates (only used to ignore repeats).
+- `Pending`: questions already answered. Unanswered questions are kept however old, because deleting one would leave its sheet item marked as asked-about with no way to answer.
+- `Synced`: records of sheet items whose first day is before this month. The past is never back-filled. An item that starts last month but runs into this one loses its record, so the next sync may ask once about the matching calendar event.
+- `State` (one small fingerprint row per tab) is never touched.
+
+The monthly run only sends a message when it removed something.
 
 ## Tests
 

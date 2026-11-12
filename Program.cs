@@ -15,6 +15,7 @@ builder.Services.AddSingleton<ISheetTabLister, GoogleSheetTabLister>();
 builder.Services.AddSingleton<SheetSync>();
 builder.Services.AddSingleton<AnnouncementProcessor>();
 builder.Services.AddSingleton<ButtonHandler>();
+builder.Services.AddSingleton<StorageCleanup>();
 
 // LLM adapters: pick one with the LLM_PROVIDER setting ("openai" or "anthropic")
 builder.Services.AddSingleton<AnthropicLlmClient>();

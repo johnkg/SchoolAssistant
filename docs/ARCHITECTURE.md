@@ -113,6 +113,7 @@ All C# files are in the repository root. Class names are `JujuCalendar`, `SheetS
 |---|---|---|
 | `Program.cs` | Starts the app and registers the parts (HTTP, Telegram, calendar, LLM, sheet sync…). Picks the LLM provider from `LLM_PROVIDER`. Turns on Application Insights if configured. | Every .NET app needs one place that wires things together. |
 | `Functions.cs` | `TelegramWebhook`: the front door. Checks the secret header, ignores other chats, dedupes repeated updates, handles `/sync`, downloads photos and PDFs, then routes to the right handler. Also holds `TelegramUpdate`, a tiny helper for reading chat ids. | Keeps "who is allowed in and where does it go" separate from "what to do with it". It contains no business rules. |
+| `Cleanup.cs` | `StorageCleanup` (deletes records from before the current month), `CleanupTimer` (monthly, quiet when nothing was removed), `CleanupResult` (the reply text). Also runs on demand with `/cleanup`. | Table Storage would otherwise grow forever. The rules for what is safe to delete are in the class comment. |
 | `Sheetsync.cs` | `SheetPollTimer` (hourly trigger) and `SheetSync` (the whole spreadsheet-to-calendar process). Contains the naming and matching prompts for the LLM. | The tracker sheet is a second input source with its own rules: new, changed, moved and vanished items. |
 
 ### Doing the work
@@ -169,6 +170,7 @@ All C# files are in the repository root. Class names are `JujuCalendar`, `SheetS
 | `CalendarTextTests.cs` | `EventText`, `CalendarEventBuilder`, `JujuCalendar` static helpers. |
 | `TelegramApiTests.cs` | Telegram calls, keyboards, callback data. |
 | `StoreTests.cs` | All four stores, including the double-tap race. |
+| `CleanupTests.cs` | The deletion rules for each table, the whole cleanup, its reply and the monthly timer. |
 | `LlmClientTests.cs` | OpenAI and Anthropic request and response shapes. |
 | `JujuCalendarTests.cs` | Calendar calls against the fake Google server. |
 | `AnnouncementProcessorTests.cs` | Flow A. |
