@@ -39,8 +39,9 @@ public class TelegramWebhookTests : Harness
     {
         var announcements = new AnnouncementProcessor(Llm, Telegram, Calendar, NullLogger<AnnouncementProcessor>.Instance);
         var buttons = new ButtonHandler(Telegram, Calendar, NullLogger<ButtonHandler>.Instance);
+        var cleanup = new StorageCleanup(NullLogger<StorageCleanup>.Instance);
         _sync = new SheetSync(Llm, Telegram, Calendar, new FakeSheetTabLister(), new StubHttpFactory(new StubHandler(_ => new HttpResponseMessage())), NullLogger<SheetSync>.Instance);
-        _webhook = new TelegramWebhook(Telegram, announcements, buttons, _sync, NullLogger<TelegramWebhook>.Instance);
+        _webhook = new TelegramWebhook(Telegram, announcements, buttons, _sync, cleanup, NullLogger<TelegramWebhook>.Instance);
         LlmAnswer = (system, _) => system.Contains("You extract")
             ? EventsJson(EventJson("Science Quiz", FutureDate(5)))
             : """{"match_id":null}""";
@@ -126,6 +127,20 @@ public class TelegramWebhookTests : Harness
         await Post(TextUpdate(command));
         Assert.Empty(Llm.Calls);
         Assert.Equal("⚠️ Set SHEET_ID first.", Assert.Single(Sent));
+    }
+
+    [Theory, InlineData("/cleanup"), InlineData("  /CLEANUP please")]
+    public async Task The_cleanup_command_removes_old_records_and_reports(string command)
+    {
+        var oldRow = CalendarEventBuilder.At(new DateOnly(ManilaTime.Today.Year, ManilaTime.Today.Month, 1).AddDays(-3), TimeOnly.MinValue);
+        await MessageStore.TryRecordAsync("old-update", "x");
+        Table(Tables.Messages).SetTimestamp(Tables.MessagesPartition, "old-update", oldRow);
+
+        await Post(TextUpdate(command));
+
+        Assert.Empty(Llm.Calls);
+        Assert.Contains("1 messages", Assert.Single(Sent));
+        Assert.Null(Table(Tables.Messages).Find(Tables.MessagesPartition, "old-update"));
     }
 
     // ---------- attachments ----------

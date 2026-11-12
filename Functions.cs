@@ -14,10 +14,12 @@ internal static class TelegramUpdate
 
 /// <summary>Telegram webhook: checks the request, ignores other chats, and routes to the sheet sync, the button handler or the announcement processor.</summary>
 public class TelegramWebhook(
-    TelegramApi telegram, AnnouncementProcessor announcements, ButtonHandler buttons, SheetSync sheetSync, ILogger<TelegramWebhook> log)
+    TelegramApi telegram, AnnouncementProcessor announcements, ButtonHandler buttons, SheetSync sheetSync,
+    StorageCleanup cleanup, ILogger<TelegramWebhook> log)
 {
     const string SecretHeader = "X-Telegram-Bot-Api-Secret-Token";
     const string SyncCommand = "/sync";
+    const string CleanupCommand = "/cleanup";
     const long MaxAttachmentBytes = 10_000_000;
 
     [Function("telegram")]
@@ -92,9 +94,15 @@ public class TelegramWebhook(
             return;
         }
 
-        if (text?.Trim().StartsWith(SyncCommand, StringComparison.OrdinalIgnoreCase) == true)
+        if (IsCommand(text, SyncCommand))
         {
             await sheetSync.RunAsync(chatId, manual: true);
+            return;
+        }
+
+        if (IsCommand(text, CleanupCommand))
+        {
+            await telegram.SendAsync(chatId, (await cleanup.RunAsync()).Describe());
             return;
         }
 
@@ -126,6 +134,9 @@ public class TelegramWebhook(
         }
         return attachments;
     }
+
+    static bool IsCommand(string? text, string command) =>
+        text?.Trim().StartsWith(command, StringComparison.OrdinalIgnoreCase) == true;
 
     static string FileIdOf(JsonElement file) => file.GetProperty("file_id").GetString()!;
 
